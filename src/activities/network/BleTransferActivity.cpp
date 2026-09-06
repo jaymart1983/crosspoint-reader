@@ -242,7 +242,7 @@ bool constantTimeEquals(const std::string& left, const std::string& right) {
 }
 
 bool hashExistingPrefix(const std::string& path, size_t bytes, mbedtls_sha256_context& context) {
-  FsFile file;
+  HalFile file;
   if (!Storage.openFileForRead("BLE", path, file)) return false;
 
   std::array<uint8_t, BLE_RESUME_HASH_CHUNK_BYTES> buffer = {};
@@ -726,7 +726,7 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     receivedBytes_ = 0;
     expectedSequence_ = 0;
     if (uploadResumable_ && Storage.exists(partPath_.c_str())) {
-      FsFile partialFile;
+      HalFile partialFile;
       if (!Storage.openFileForRead("BLE", partPath_, partialFile)) {
         setError("could not inspect partial transfer");
         resetTransfer(true);

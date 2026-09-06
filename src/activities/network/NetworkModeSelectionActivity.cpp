@@ -40,7 +40,7 @@ constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
     UIIcon::Usb,
 #endif
 #if FREEINK_CAP_BLE_TRANSFER
-    UIIcon::Bluetooth,
+    UIIcon::Transfer,
 #endif
 };
 constexpr NetworkMode menuModes[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {

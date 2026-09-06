@@ -62,8 +62,8 @@ class BleTransferActivity final : public Activity {
 
   State state_ = State::STARTING;
   std::unique_ptr<BleTransferRuntime> ble_;
-  FsFile uploadFile_;
-  FsFile downloadFile_;
+  HalFile uploadFile_;
+  HalFile downloadFile_;
   SemaphoreHandle_t eventMutex_ = nullptr;
   std::deque<BleEvent> bleEvents_;
   size_t queuedBleEventBytes_ = 0;
