@@ -13,6 +13,7 @@
 #include "NetworkModeSelectionActivity.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
+#include "activities/ActivityManager.h"
 #include "activities/network/CalibreConnectActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -130,6 +131,10 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   } else if (mode == NetworkMode::USB_DRIVE) {
     modeName = "USB Drive";
 #endif
+#if FREEINK_CAP_BLE_TRANSFER
+  } else if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
+    modeName = "Bluetooth Transfer";
+#endif
   }
   LOG_DBG("WEBACT", "Network mode selected: %s", modeName);
 
@@ -142,6 +147,11 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
 
   networkMode = mode;
   isApMode = (mode == NetworkMode::CREATE_HOTSPOT);
+
+  if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
+    activityManager.goToBluetoothTransfer();
+    return;
+  }
 
   if (mode == NetworkMode::CONNECT_CALIBRE) {
     startActivityForResult(

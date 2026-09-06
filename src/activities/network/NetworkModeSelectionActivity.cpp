@@ -17,6 +17,9 @@ constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE,
 #endif
+#if FREEINK_CAP_BLE_TRANSFER
+    StrId::STR_BLUETOOTH_TRANSFER,
+#endif
 };
 constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
     StrId::STR_JOIN_DESC,
@@ -25,6 +28,9 @@ constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE_DESC,
 #endif
+#if FREEINK_CAP_BLE_TRANSFER
+    StrId::STR_BLUETOOTH_TRANSFER_DESC,
+#endif
 };
 constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
     UIIcon::Wifi,
@@ -32,6 +38,20 @@ constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
     UIIcon::Hotspot,
 #if FREEINK_CAP_USB_MSC
     UIIcon::Usb,
+#endif
+#if FREEINK_CAP_BLE_TRANSFER
+    UIIcon::Bluetooth,
+#endif
+};
+constexpr NetworkMode menuModes[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+    NetworkMode::JOIN_NETWORK,
+    NetworkMode::CONNECT_CALIBRE,
+    NetworkMode::CREATE_HOTSPOT,
+#if FREEINK_CAP_USB_MSC
+    NetworkMode::USB_DRIVE,
+#endif
+#if FREEINK_CAP_BLE_TRANSFER
+    NetworkMode::BLUETOOTH_TRANSFER,
 #endif
 };
 }  // namespace
@@ -59,7 +79,7 @@ void NetworkModeSelectionActivity::activateIndex(const int index) {
   app.clearTapFlash();
   nav.selected = index;
 
-  onModeSelected(static_cast<NetworkMode>(index));
+  onModeSelected(menuModes[index]);
 }
 
 void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {

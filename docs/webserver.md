@@ -128,6 +128,29 @@ server is running.
 
 Endpoint details are documented in [webserver-endpoints.md](./webserver-endpoints.md).
 
+## Bluetooth File Transfer
+
+CrossPoint Reader also supports Bluetooth transfer from **File Transfer > Bluetooth Transfer**. Bluetooth is advertised
+only while that screen is open. It is a convenient path for quick reader interactions where joining WiFi or starting a
+hotspot is more work than the transfer itself, such as pulling a crash report, dropping a BMP image, or sending a book.
+
+Open <https://ble.xteink.lol/> in a Web Bluetooth-compatible Chromium browser, connect to the reader, and enter the
+six-digit code shown on the screen. After the reader confirms saving the browser, future transfers can use trusted
+browser authentication without re-entering the code. The reader asks to save the browser after a successful upload.
+
+The browser companion supports EPUB and BMP uploads and crash-report download. Firmware updates are available through
+the command-line tool:
+
+```sh
+python3 scripts/ble_transfer.py put-book path/to/book.epub --code 123456
+python3 scripts/ble_transfer.py put-bmp path/to/image.bmp --code 123456
+python3 scripts/ble_transfer.py put-firmware path/to/firmware.bin --code 123456
+python3 scripts/ble_transfer.py get-crash-report ./crash_report.txt --code 123456
+```
+
+The companion source is available at <https://github.com/marginalia-os/ble-xteink>. CrossPoint's BLE protocol is
+documented in [BLE Transfer Protocol](./ble-transfer-protocol.md).
+
 ## Security Notes
 
 - The HTTP server runs on port 80.
@@ -136,6 +159,14 @@ Endpoint details are documented in [webserver-endpoints.md](./webserver-endpoint
 - Anyone on the same network can access the web interface while it is running.
 - The server stops when you exit File Transfer or Calibre Wireless mode.
 - Hotspot mode creates an open network for connectivity fallback; disconnect when done.
+- The web server runs on port 80 (standard HTTP)
+- **No authentication is required** - anyone on the same network can access the interface
+- The web server is only accessible while the WiFi screen shows "Connected"
+- The web server automatically stops when you exit the WiFi screen
+- Bluetooth transfer requires the visible code on first use or a trusted host saved on the reader
+- Bluetooth transfer is only available while the Bluetooth Transfer screen is open
+- For security, only use on trusted private networks
+
 
 ## Tips
 

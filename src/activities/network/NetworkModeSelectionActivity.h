@@ -4,13 +4,14 @@
 
 #include "activities/UiListActivity.h"
 
-enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, CREATE_HOTSPOT, USB_DRIVE };
+enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, CREATE_HOTSPOT, USB_DRIVE, BLUETOOTH_TRANSFER };
 
 /**
  * NetworkModeSelectionActivity presents the user with a choice:
  * - "Join a Network" - Connect to an existing WiFi network (STA mode)
  * - "Connect to Calibre" - Use Calibre wireless device transfers
  * - "Create Hotspot" - Create an Access Point that others can connect to (AP mode)
+ * - "Bluetooth Transfer" - Use BLE transfer with the browser companion or CLI
  *
  * The onModeSelected callback is called with the user's choice.
  * The onCancel callback is called if the user presses back.
@@ -21,11 +22,16 @@ class NetworkModeSelectionActivity final : public UiListActivity {
  public:
   explicit NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
+  // Base rows: Join / Calibre / Hotspot. USB Drive and Bluetooth Transfer are
+  // each capability-gated, so the count is computed rather than hardcoded.
+  static constexpr int MENU_ITEM_COUNT = 3
 #if FREEINK_CAP_USB_MSC
-  static constexpr int MENU_ITEM_COUNT = 4;
-#else
-  static constexpr int MENU_ITEM_COUNT = 3;
+                                         + 1
 #endif
+#if FREEINK_CAP_BLE_TRANSFER
+                                         + 1
+#endif
+      ;
 
   void onModeSelected(NetworkMode mode);
   void onCancel();
