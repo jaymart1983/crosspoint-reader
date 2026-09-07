@@ -35,7 +35,14 @@ constexpr unsigned long REQUEST_TIMEOUT_MS = 20000;
 // even begin sending, which is the one step that is genuinely slow. The clock
 // stops the moment the upload starts -- from there the ordinary transfer
 // machinery reports progress and owns the failure.
-constexpr unsigned long FETCH_TIMEOUT_MS = 45000;
+// The fetch budget has to cover the phone's OWN network fetch, not just the BLE
+// leg: the app downloads the book from Calibre-Web before it can start sending,
+// and 45s was not enough for a real EPUB over a remote link -- the reader gave up
+// while the phone was still downloading and reported "the app did not answer",
+// moments before the upload arrived. The deadline ends the instant the upload
+// starts (see onFetchStarted), so a slow transfer is never charged against it;
+// this only bounds how long the reader waits to hear anything at all.
+constexpr unsigned long FETCH_TIMEOUT_MS = 150000;
 // GATT notifications are unacknowledged, so a request that goes unanswered is
 // re-notified rather than assumed lost. Same `req` every time: an app that got
 // the first copy answers once and ignores the rest.

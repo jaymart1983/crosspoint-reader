@@ -915,21 +915,61 @@ void loop() {
   }
 
 #if FREEINK_CAP_USB_MSC
-  // USB Drive is what a cable MEANS now; there is no menu to pick it from.
+  // USB Drive, with no screen of its own.
   //
-  // The latch is the whole subtlety. gpio's edge detector starts from
-  // "disconnected", so the first update() on a device that booted with a cable in
-  // reports a plug edge that never happened -- and that device is almost always
-  // one being flashed or watched over the serial console. So the edge only counts
-  // once this run has actually seen the cable out: plugging into a sleeping or
-  // powered-off reader boots it normally on USB Serial/JTAG and esptool keeps
-  // working, while plugging into an awake one mounts the card. Pressing Back on
-  // the mount screen reboots straight back to the serial personality.
+  // It used to open UsbDriveActivity, and that is what was locking the device up.
+  // beginUsbDrive() DETACHES the FAT filesystem to hand the host raw blocks, and
+  // fonts are read from that filesystem (SdCardFont -> Storage.openFileForRead).
+  // The activity painted "Waiting for host" *after* the detach, so any glyph not
+  // already in the font cache became an SD read against a filesystem that no
+  // longer existed -- an intermittent hard hang, depending on what happened to be
+  // cached. The old exit path had the same defect: it drew a popup before
+  // handing the pads back.
+  //
+  // So nothing is rendered once the card is gone. The header repaint below runs
+  // while the filesystem is still mounted -- that is what puts "USB" in the top
+  // bar -- and after that the device draws nothing at all until the host lets go.
+  //
+  // The latch is unchanged: gpio's edge detector starts from "disconnected", so
+  // a device that booted with a cable in reports a plug edge that never happened,
+  // and that device is almost always one being flashed.
   static bool sawUsbUnplugged = false;
+  static bool usbDriveActive = false;
   if (!gpio.isUsbConnected()) sawUsbUnplugged = true;
+
+  if (usbDriveActive) {
+    // No activity loop, no repaint, no storage call except the state poll: the
+    // card belongs to the host until it says otherwise.
+    const UsbDriveState driveState = Storage.usbDriveState();
+    const bool hostFinished = driveState == UsbDriveState::Ejected || driveState == UsbDriveState::Disconnected ||
+                              driveState == UsbDriveState::IoError;
+    if (hostFinished || !gpio.isUsbConnected()) {
+      LOG_INF("USB", "host released the card; rebooting to the serial personality");
+      Storage.endUsbDrive();
+      // Deliberately not restartToHomeAfterStorageHandoff(): that draws a popup,
+      // and the filesystem the fonts live on has only just come back. A reboot
+      // shows the boot screen anyway.
+      silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
+      silentRebootMagic = SILENT_REBOOT_MAGIC;
+      handoffUsbOtgToSerialJtag();
+      ESP.restart();
+    }
+    powerManager.setPowerSaving(true);
+    delay(50);
+    return;
+  }
+
   if (sawUsbUnplugged && gpio.wasUsbStateChanged() && gpio.isUsbConnected()) {
     LOG_INF("USB", "cable plugged into an awake device; mounting the card");
-    activityManager.goToUsbDrive(/*automatic=*/true);
+    // Paint the header (which now carries "USB") while the fonts are still
+    // readable, and wait for that paint to finish. Every render after this point
+    // would be a read against a detached filesystem.
+    activityManager.requestUpdateAndWait();
+    if (Storage.beginUsbDrive()) {
+      usbDriveActive = true;
+    } else {
+      LOG_ERR("USB", "could not hand the card to the host; carrying on normally");
+    }
     return;
   }
 #endif

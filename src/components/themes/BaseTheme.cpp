@@ -437,10 +437,12 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   // what this answers is "can the Store reach my phone right now", and a saved
   // trusted host does not answer that.
   bool showBle = false;
-  bool bleLinked = false;
 #if FREEINK_CAP_BLE_TRANSFER
-  showBle = true;
-  bleLinked = BLE_LINK.isAuthenticated();
+  // Shown only while a phone is connected AND through the hello gate, and absent
+  // otherwise -- the same rule as USB. A struck-through word was a third state to
+  // read at a glance for no gain: "no phone" and "no cable" are the ordinary
+  // condition, and the header should be quiet in it.
+  showBle = BLE_LINK.isAuthenticated();
 #endif
   // "USB" only while a cable is attached; absent otherwise, so the header stays
   // quiet on battery.
@@ -538,7 +540,7 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
       drawStatusLabel(renderer, batteryLeft ? cursorX : cursorX - width, centerY, text, slashed);
       cursorX += batteryLeft ? width + tokens.spaceMd : -(width + tokens.spaceMd);
     };
-    if (showBle) place(bleWidth, "BLE", !bleLinked);
+    if (showBle) place(bleWidth, "BLE", false);
     if (showUsb) place(usbWidth, "USB", false);
 
     if (showClock) {
