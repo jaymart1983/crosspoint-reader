@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "BleTrustedHostStore.h"
+#include "CrossPointSettings.h"
 #include "FirmwareFlasher.h"
 #include "FirmwareStaging.h"
 #include "activities/Activity.h"  // pulls ActivityManager.h with Activity complete
@@ -54,6 +55,15 @@ constexpr const char* CRASH_REPORT_NAME = "crash_report.txt";
 constexpr const char* LIBRARY_INDEX_PATH = "/.crosspoint/ble-library.json";
 constexpr const char* LIBRARY_INDEX_NAME = "library.json";
 constexpr const char* CROSSPOINT_ROOT = "/.crosspoint";
+// Settings move over the link as one JSON document, the same shape
+// CrossPointSettings already persists -- toJson()/fromJson() are the single
+// definition of what a setting is, so the transport adds no second schema to
+// keep in step.
+constexpr const char* SETTINGS_SNAPSHOT_PATH = "/.crosspoint/ble-settings.json";
+constexpr const char* SETTINGS_SNAPSHOT_NAME = "settings.json";
+constexpr const char* SETTINGS_INBOX_PATH = "/.crosspoint/ble-settings-in.json";
+constexpr const char* SETTINGS_INBOX_NAME = "settings-in.json";
+constexpr size_t MAX_BLE_SETTINGS_BYTES = 64 * 1024;
 // A `progress` batch is staged like any other upload -- part file, SHA-256 over
 // the whole thing, rename on commit -- and only then parsed. Verifying before
 // touching a single book means a truncated batch cannot half-apply.
@@ -1215,6 +1225,29 @@ void BleLink::onControlWrite(const std::string& value) {
       fileName_ = PROGRESS_BATCH_NAME;
       partPath_ = PROGRESS_BATCH_PART_PATH;
       finalPath_ = PROGRESS_BATCH_PATH;
+    } else if (kind == "settings") {
+      // Settings are the device's own state, and several of them (orientation,
+      // theme, sleep timeout) change what is on screen the moment they land.
+      // Refused while a book is open for the same reason a progress batch is:
+      // the reader holds state that would be written back over the top on exit.
+      if (activityManager.isReaderActivity()) {
+        setError("book open");
+        return;
+      }
+      if (expectedSize_ == 0 || expectedSize_ > MAX_BLE_SETTINGS_BYTES) {
+        setError("invalid settings size");
+        return;
+      }
+      if (!Storage.ensureDirectoryExists(CROSSPOINT_ROOT)) {
+        setError("could not create data directory");
+        return;
+      }
+      // Staged at a fixed scratch path, parsed on commit and deleted -- it has
+      // no user-facing name and never lands on the shelf.
+      transferKind_ = TransferKind::SETTINGS_INBOX;
+      fileName_ = SETTINGS_INBOX_NAME;
+      partPath_ = std::string(SETTINGS_INBOX_PATH) + ".part";
+      finalPath_ = SETTINGS_INBOX_PATH;
     } else if (kind == "catalog_page" || kind == "catalog_detail") {
       // The answer to the question in the last `status` notification. It rides
       // the ordinary upload path -- framing, credit flow control, SHA-256,
@@ -1354,6 +1387,10 @@ void BleLink::onControlWrite(const std::string& value) {
       startProgressResultDownload(static_cast<size_t>(offsetValue), static_cast<size_t>(chunkSizeValue));
       return;
     }
+    if (kind == "settings") {
+      startSettingsDownload(static_cast<size_t>(offsetValue), static_cast<size_t>(chunkSizeValue));
+      return;
+    }
     setError("unsupported transfer kind");
     return;
   }
@@ -1469,7 +1506,8 @@ void BleLink::processCommit() {
     return;
   }
   if ((transferKind_ == TransferKind::FIRMWARE || transferKind_ == TransferKind::PROGRESS ||
-       transferKind_ == TransferKind::CATALOG_PAGE || transferKind_ == TransferKind::CATALOG_DETAIL) &&
+       transferKind_ == TransferKind::SETTINGS_INBOX || transferKind_ == TransferKind::CATALOG_PAGE ||
+       transferKind_ == TransferKind::CATALOG_DETAIL) &&
       Storage.exists(finalPath_.c_str()) && !Storage.remove(finalPath_.c_str())) {
     setError("could not replace staged upload");
     resetTransfer(true);
@@ -1509,6 +1547,18 @@ void BleLink::processCommit() {
     // Only now that the whole batch is on disk and its SHA-256 checks out does
     // anything get written underneath a book.
     processProgressBatch();
+    return;
+  }
+
+  if (transferKind_ == TransferKind::SETTINGS_INBOX) {
+    // Only now that the whole document is on disk and its SHA-256 checks out is
+    // anything applied: a half-received settings file must never be able to
+    // half-configure the device.
+    if (!applySettingsDocument()) {
+      resetTransfer(true);
+      return;
+    }
+    setState(State::SAVED);
     return;
   }
 
@@ -1618,6 +1668,73 @@ void BleLink::startLibraryDownload(const size_t offset, const size_t chunkSize) 
 
 void BleLink::startProgressResultDownload(const size_t offset, const size_t chunkSize) {
   startFileDownload(PROGRESS_RESULT_PATH, PROGRESS_RESULT_NAME, TransferKind::PROGRESS_RESULT, offset, chunkSize);
+}
+
+void BleLink::startSettingsDownload(const size_t offset, const size_t chunkSize) {
+  // Re-serialised on every start_get rather than cached: settings change from
+  // the device's own screens too, and a snapshot the app fetched from a stale
+  // file would be silently wrong in exactly the case that matters -- the user
+  // changed something on the reader and then opened the app.
+  //
+  // Only on a fresh request, though: a resumed transfer (offset > 0) must keep
+  // reading the bytes the earlier chunks came from, or the document the app
+  // reassembles is a splice of two different snapshots.
+  if (offset == 0) {
+    if (!Storage.ensureDirectoryExists(CROSSPOINT_ROOT)) {
+      setError("could not create data directory");
+      return;
+    }
+    JsonDocument doc;
+    SETTINGS.toJson(doc);
+    if (Storage.exists(SETTINGS_SNAPSHOT_PATH)) Storage.remove(SETTINGS_SNAPSHOT_PATH);
+    HalFile out;
+    if (!Storage.openFileForWrite("BLE", SETTINGS_SNAPSHOT_PATH, out)) {
+      setError("could not stage settings");
+      return;
+    }
+    // Through a String, as BookLibraryIndex does: the settings document is a few
+    // KB, so there is nothing to gain from streaming it and a good deal to lose
+    // in a half-written file if the write fails partway.
+    String json;
+    serializeJson(doc, json);
+    const bool ok = json.length() > 0 && out.print(json) == json.length();
+    out.close();
+    if (!ok) {
+      Storage.remove(SETTINGS_SNAPSHOT_PATH);
+      setError("could not serialise settings");
+      return;
+    }
+  }
+  startFileDownload(SETTINGS_SNAPSHOT_PATH, SETTINGS_SNAPSHOT_NAME, TransferKind::SETTINGS_SNAPSHOT, offset,
+                    chunkSize);
+}
+
+bool BleLink::applySettingsDocument() {
+  HalFile in;
+  if (!Storage.openFileForRead("BLE", SETTINGS_INBOX_PATH, in)) {
+    setError("could not read settings");
+    return false;
+  }
+  JsonDocument doc;
+  const DeserializationError parseError = deserializeJson(doc, in);
+  in.close();
+  Storage.remove(SETTINGS_INBOX_PATH);
+  if (parseError) {
+    setError(std::string("invalid settings: ") + parseError.c_str());
+    return false;
+  }
+  // fromJson() is the same path a settings file read at boot goes through, so
+  // an app-sent document gets the identical validation, clamping and revision
+  // migration -- there is no second, laxer way into the settings store.
+  if (!SETTINGS.fromJson(doc.as<JsonVariantConst>())) {
+    setError("settings rejected");
+    return false;
+  }
+  if (!SETTINGS.saveToFile()) {
+    setError("could not persist settings");
+    return false;
+  }
+  return true;
 }
 
 void BleLink::processProgressBatch() {
@@ -1930,10 +2047,12 @@ std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned det
     uploadKinds.add("progress");
     uploadKinds.add("catalog_page");
     uploadKinds.add("catalog_detail");
+    uploadKinds.add("settings");
     JsonArray downloadKinds = doc["download_kinds"].to<JsonArray>();
     downloadKinds.add("crash_report");
     downloadKinds.add("library");
     downloadKinds.add("progress_result");
+    downloadKinds.add("settings");
   }
   // The store is a capability of this firmware, not of this screen: an app can
   // see it is supported while the user is still on the transfer screen.

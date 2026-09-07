@@ -102,12 +102,20 @@ void BlePairingActivity::render(RenderLock&&) {
   }
 
   // --- the code -------------------------------------------------------------
-  // Drawn before anything below it is allowed to claim space, and never
-  // conditional on any of it. See the class comment: every route out of a
-  // pairing failure runs through these six digits.
-  const std::string code = std::string(tr(STR_BLE_TRANSFER_CODE)) + BLE_LINK.sessionCode();
-  renderer.drawCenteredText(UI_12_FONT_ID, y, code.c_str(), true, EpdFontFamily::BOLD);
-  y += renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing;
+  // Shown only while no phone is paired. Once a trusted host is stored the code
+  // is not merely unnecessary, it is misleading: a paired phone reconnects over
+  // its saved credential and never sends the code, so showing six digits invites
+  // the user to type something that is not what the reader is waiting for.
+  //
+  // This does not strand anyone. Forget, below, is on this same screen and takes
+  // the device back to the unpaired state -- which is what brings the code back.
+  // That is the route out of a broken credential, and it is a deliberate action
+  // rather than a number sitting on screen at all times.
+  if (!paired) {
+    const std::string code = std::string(tr(STR_BLE_TRANSFER_CODE)) + BLE_LINK.sessionCode();
+    renderer.drawCenteredText(UI_12_FONT_ID, y, code.c_str(), true, EpdFontFamily::BOLD);
+    y += renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing;
+  }
 
   if (!authError.empty()) {
     // Under the code, in the small face: a refusal is a footnote to the code, not

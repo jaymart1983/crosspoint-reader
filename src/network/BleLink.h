@@ -67,7 +67,12 @@ class BleLink {
     LIBRARY,
     PROGRESS_RESULT,
     CATALOG_PAGE,
-    CATALOG_DETAIL
+    CATALOG_DETAIL,
+    // Not SETTINGS: that name is a macro for the settings singleton
+    // (CrossPointSettings.h), and an enumerator by that name expands inside the
+    // enum and takes the whole class declaration with it.
+    SETTINGS_INBOX,   ///< app -> device: a settings document to apply
+    SETTINGS_SNAPSHOT ///< device -> app: the current settings document
   };
 
   // A screen that paints something about the link. There is at most one: only
@@ -253,6 +258,12 @@ class BleLink {
   void startCrashReportDownload(size_t offset, size_t chunkSize);
   void startLibraryDownload(size_t offset, size_t chunkSize);
   void startProgressResultDownload(size_t offset, size_t chunkSize);
+  // Serialises the live settings to a scratch file and streams that, rather
+  // than holding the document in RAM for the length of a chunked transfer.
+  void startSettingsDownload(size_t offset, size_t chunkSize);
+  // Parses a committed settings document and applies it. Returns false with
+  // the error already set when the document is unusable.
+  bool applySettingsDocument();
   void processProgressBatch();
   void pumpDownload();
   void resetTransfer(bool removePart);
