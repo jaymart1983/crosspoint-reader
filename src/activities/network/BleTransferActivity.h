@@ -5,6 +5,7 @@
 #include <freertos/semphr.h>
 #include <mbedtls/sha256.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -76,6 +77,12 @@ class BleTransferActivity final : public Activity, public BleStoreController::Ho
   void enqueueBleDisconnected();
   void enqueueControlWrite(const std::string& value);
   void enqueueDataWrite(const std::string& value);
+  // Called from the NimBLE host task on connect and on every MTU exchange. Zero
+  // means "nothing negotiated", which is read back as the 23-byte BLE default.
+  void noteBleMtu(uint16_t mtu);
+  // The most a notification may carry right now: ATT_MTU-3, never more than
+  // BLE_STATUS_NOTIFY_MAX_BYTES. Public because the runtime sizes frames by it.
+  size_t notifyCapBytes() const;
 
  private:
   friend struct BleTransferRuntime;
@@ -138,6 +145,9 @@ class BleTransferActivity final : public Activity, public BleStoreController::Ho
   uint32_t expectedSequence_ = 0;
   uint32_t downloadSequence_ = 0;
   uint32_t pendingDownloadAck_ = 0;
+  // Last MTU the peer negotiated, written from the NimBLE host task and read
+  // from the activity loop. 0 until an exchange happens; see notifyCapBytes().
+  std::atomic<uint16_t> negotiatedMtu_{0};
   bool helloAccepted_ = false;
   bool transferOpen_ = false;
   bool downloadOpen_ = false;
@@ -181,7 +191,16 @@ class BleTransferActivity final : public Activity, public BleStoreController::Ho
   void storeFinish() override;
   void storeOpenBook(const std::string& path) override;
   void publishStatus();
-  std::string buildStatusJson() const;
+  // READ is the authoritative document a GATT read returns -- everything the
+  // session knows. NOTIFY is the doorbell: the same document with the fields a
+  // client can re-read dropped, so it fits an ATT payload without truncation.
+  enum class StatusScope { READ, NOTIFY };
+  // `detail` narrows a NOTIFY document; it is ignored for READ. See
+  // STATUS_DETAIL_MAX in the .cpp for what each level keeps.
+  std::string buildStatusJson(StatusScope scope, unsigned detail) const;
+  // The largest NOTIFY document that fits `capBytes`, shrinking a level at a
+  // time. Never returns truncated JSON -- the floor is `{}`.
+  std::string buildNotifyJson(size_t capBytes) const;
   bool setPendingTrustedHost(const std::string& hostId, const std::string& hostName, const std::string& secret);
   void completeFinalState(State finalState);
   void handleFirmwareConfirm();

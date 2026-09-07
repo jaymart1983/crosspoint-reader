@@ -114,7 +114,7 @@ void BleStoreController::fail(const std::string& message) {
   host.storePublishStatus();
 }
 
-void BleStoreController::describePending(JsonDocument& doc) const {
+void BleStoreController::describePending(JsonDocument& doc, const bool terse) const {
   if (pending_ == PendingOp::NONE) return;
   JsonObject out = doc["pending"].to<JsonObject>();
   out["req"] = pendingReq_;
@@ -122,6 +122,7 @@ void BleStoreController::describePending(JsonDocument& doc) const {
     case PendingOp::PAGE:
       out["op"] = "catalog_page";
       out["offset"] = pendingOffset_;
+      if (terse) break;
       out["limit"] = static_cast<uint32_t>(BleCatalog::PAGE_LIMIT);
       out["thumb_w"] = BleCatalog::THUMB_WIDTH;
       out["thumb_h"] = BleCatalog::THUMB_HEIGHT;
@@ -130,6 +131,7 @@ void BleStoreController::describePending(JsonDocument& doc) const {
     case PendingOp::DETAIL:
       out["op"] = "catalog_detail";
       out["id"] = pendingId_.c_str();
+      if (terse) break;
       out["thumb_w"] = BleCatalog::COVER_WIDTH;
       out["thumb_h"] = BleCatalog::COVER_HEIGHT;
       out["desc_max"] = static_cast<uint32_t>(BleCatalog::MAX_DETAIL_DESCRIPTION_BYTES);
@@ -137,11 +139,13 @@ void BleStoreController::describePending(JsonDocument& doc) const {
     case PendingOp::FETCH:
       out["op"] = "catalog_fetch";
       out["id"] = pendingId_.c_str();
+      if (terse) break;
       if (!fetchFilename_.empty()) out["name"] = fetchFilename_.c_str();
       break;
     case PendingOp::NONE:
       break;
   }
+  if (terse) return;
   // Deliberately advertised: an app that knows the deadline can give up and send
   // catalog_error rather than let the device sit out the full window.
   out["timeout_ms"] = static_cast<uint32_t>(pending_ == PendingOp::FETCH ? FETCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS);

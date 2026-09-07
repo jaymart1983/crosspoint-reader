@@ -39,6 +39,13 @@ class MappedInputManager;
 // slow reply, arriving after the user has already paged on, from repainting the
 // screen with the page they left.
 //
+// SIZE. The full status document is ~570 bytes and a notification carries at
+// most ATT_MTU-3 -- 20 bytes on a peer that never exchanges MTUs. So the
+// notified document is built separately and kept under 180 bytes, shedding whole
+// fields until it fits rather than ever being truncated; the GATT read returns
+// the whole thing. See buildNotifyJson() in BleTransferActivity.cpp. `pending`
+// is near the bottom of that shed order, so a request reaches the app intact.
+//
 // RETRY. A GATT notification is unacknowledged -- there is no ATT-level
 // confirmation that the app received it -- so the pending block is re-notified
 // every REPUBLISH_MS while it is outstanding, up to MAX_PUBLISHES times. The
@@ -101,7 +108,10 @@ class BleStoreController {
   // True when `req` is the answer the device is actually waiting for.
   bool acceptsResponse(uint32_t req, PendingOp op) const { return pending_ == op && req == pendingReq_ && req != 0; }
   // Writes the `pending` object into the status document, when there is one.
-  void describePending(JsonDocument& doc) const;
+  // `terse` keeps only what an answer must quote back -- `req` and `op` -- for a
+  // notification too small to carry the geometry and the deadline as well. Those
+  // are never lost: a GATT read of `status` always returns the full block.
+  void describePending(JsonDocument& doc, bool terse = false) const;
 
   // A committed `catalog_page` / `catalog_detail` upload is staged at `path`.
   void onCatalogCommitted(const char* path, bool detail);

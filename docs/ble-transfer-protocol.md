@@ -19,7 +19,7 @@ Clients should discover the service by UUID. The user-visible name is not part o
 | --- | --- | --- | --- |
 | `control` | `6f9f0a01-9b1d-4d1f-9f53-5b6b8b3d0f10` | client to reader | write with response |
 | `data-in` | `6f9f0a02-9b1d-4d1f-9f53-5b6b8b3d0f10` | client to reader | write, write without response |
-| `status` | `6f9f0a03-9b1d-4d1f-9f53-5b6b8b3d0f10` | reader to client | read, notify |
+| `status` | `6f9f0a03-9b1d-4d1f-9f53-5b6b8b3d0f10` | reader to client | read, notify (the read and the notification carry *different* documents — see [The Store](#the-store-requests-over-the-notify-channel)) |
 | `data-out` | `6f9f0a04-9b1d-4d1f-9f53-5b6b8b3d0f10` | reader to client | notify |
 
 ## Authentication
@@ -353,13 +353,34 @@ the whole payload, `commit`. The one thing the store adds to an upload is a `req
 the framing, the hashing and the flow control are all reused untouched — the store is a new question, not a
 new transport.
 
-**A status carrying `pending` is deliberately terse.** A notification carries at most `ATT_MTU - 3` bytes,
-which is 182 on a client that negotiates the iOS default, and the request is the field that must survive.
-So while a request is outstanding the reader omits `firmware_name`, `browser_companion_url`,
-`firmware_ota_supported`, `resume_supported`, `upload_kinds`, `download_kinds`, `device_id`, `device_nonce`
-and `has_trusted_host`. None of them change within a session and all of them were read before the gate
-opened. **The notification is a doorbell; a GATT read of `status` is authoritative** and returns the whole
-document whatever the MTU.
+**A notification is a doorbell; a GATT read of `status` is authoritative.** A notification carries at most
+`ATT_MTU - 3` bytes — 514 at the 517 the reader asks for, 182 on a client that negotiates the iOS default,
+and 20 on one that never exchanges MTUs at all. The full status document is around 570 bytes, so it is
+**never** notified. The reader keeps the notified payload at or under **180 bytes**, which is `ATT_MTU - 3`
+for the ~185-byte MTU that iOS and most Android stacks settle on, so the doorbell survives a small MTU, a
+re-negotiation downwards, and a reconnect that never exchanges.
+
+To stay under that cap the reader drops whole fields, in this order, and stops as soon as the document
+fits. It never truncates: a client always receives parseable JSON.
+
+| Dropped | Fields |
+| --- | --- |
+| first | `protocol_version`, `store_supported`, `clock_supported`, `device_time` |
+| then | `trusted_host`, `paired`, `pairing`, `mode`, `name`, `path` |
+| then | `pending` keeps only `req`, `op` and the `id`/`offset` an answer must quote back |
+| then | the transfer counters (`kind`, `received`, `sent`, `written`, `size`, `ack_bytes`, `resumable`, `entries`, `applied`) and the `error` text |
+| last | `pending` |
+| floor | `{"state":"…"}`, and below that `{}` |
+
+`firmware_name`, `browser_companion_url`, `firmware_ota_supported`, `resume_supported`, `upload_kinds`,
+`download_kinds`, `device_id`, `device_nonce` and `has_trusted_host` are **read-only**: they are in the
+document a GATT read returns and in no notification at any size. None of them change within a session.
+
+In practice, at 180 bytes, a `pending` request is notified with its geometry intact and a transfer is
+notified with its byte counters intact — the two things a live session cannot work without, since
+`received` is the credit ack an upload waits on. **Read the characteristic once after subscribing, keep
+the session-constant fields, and merge each notification over them.** `scripts/ble_transfer.py` does
+exactly this; see `SESSION_FACT_KEYS`.
 
 ### Correlation
 
@@ -605,8 +626,9 @@ Status JSON includes capability fields so clients can hide unsupported controls:
 
 `device_time` is present only when the device knows the time; see [Device clock](#device-clock).
 `store_supported` says this firmware speaks the Store request protocol; `"mode": "store"` says the Store
-screen is the one currently open. A status that carries a `pending` block omits the static fields above —
-see [The Store](#the-store-requests-over-the-notify-channel) for why, and read the characteristic rather
-than relying on the notification if you need them.
+screen is the one currently open. **Every field above comes from a GATT read of `status`, not from a
+notification** — the whole document is ~570 bytes and no notification is large enough to carry it. Read the
+characteristic after subscribing and merge notifications over what it gave you; see
+[The Store](#the-store-requests-over-the-notify-channel) for the exact rule.
 
 Clients should still handle `state: "error"` for rejected operations.

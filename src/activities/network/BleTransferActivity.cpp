@@ -109,6 +109,40 @@ constexpr size_t EPUB_SUFFIX_LEN = 5;
 constexpr size_t BMP_SUFFIX_LEN = 4;
 constexpr size_t BIN_SUFFIX_LEN = 4;
 constexpr int BLE_TRANSFER_QR_SIZE = 172;
+// A GATT notification carries at most ATT_MTU-3 bytes, and the peer decides the
+// MTU. Until it has exchanged one the only defensible assumption is the 23-byte
+// BLE minimum -- 20 bytes of payload.
+constexpr uint16_t BLE_ATT_MTU_MINIMUM = 23;
+constexpr size_t BLE_ATT_NOTIFY_OVERHEAD = 3;
+// Even when the peer grants 517 the status notification stays inside this. It is
+// ATT_MTU-3 for the ~185-byte MTU that iOS and most Android stacks settle on, so
+// the doorbell survives a re-negotiation downwards, a stack that reports the MTU
+// it asked for rather than the one in force, and a reconnect that never
+// exchanges at all. The whole document is on the READ; there is nothing to gain
+// by filling 514 bytes of notification with it.
+constexpr size_t BLE_STATUS_NOTIFY_MAX_BYTES = 180;
+// Shrink levels for a NOTIFY document, richest first. Each level drops the next
+// least useful group of fields; level 0 is `{"state":"..."}` alone, and the
+// floor below that is the empty object. Nothing is ever cut mid-string.
+//   5  everything a notification may carry
+//   4  - protocol_version, store_supported, clock_supported, device_time
+//   3  - trusted_host, paired, pairing, mode, name, path
+//   2  - the pending block shrinks to the `req`/`op` an answer must quote back
+//   1  - the transfer counters and the error text
+//   0  - the pending block
+// The two things a live session cannot lose sit at the bottom of the order on
+// purpose. `received` IS the credit ack an upload waits on (see onDataWrite), so
+// a notification that drops it stalls the transfer. The `pending` geometry is
+// what the app builds its answer from, so it stays whole down to level 3 -- at
+// 180 bytes every real store request still fits there, and only a book arriving
+// while a fetch is outstanding pushes as far as level 2.
+constexpr unsigned STATUS_DETAIL_MAX = 5;
+// The floor of the ladder must itself be sendable on the worst link there is,
+// or "never truncate" is a promise the code cannot keep.
+static_assert(sizeof("{}") - 1 <= BLE_ATT_MTU_MINIMUM - BLE_ATT_NOTIFY_OVERHEAD,
+              "the empty-object fallback must fit a 23-byte ATT MTU");
+static_assert(BLE_STATUS_NOTIFY_MAX_BYTES <= 517 - BLE_ATT_NOTIFY_OVERHEAD,
+              "the notify cap must fit the largest MTU this server asks for");
 
 std::string makeSessionCode() {
   char buffer[7];
@@ -437,10 +471,19 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
     server->updateConnParams(connInfo.getConnHandle(), 6, 12, 0, 120);
     server->setDataLen(connInfo.getConnHandle(), 251);
+    // Still the 23-byte default at this point on most stacks; onMTUChange
+    // corrects it a moment later. Recorded either way so a peer that never
+    // exchanges is sized for honestly rather than optimistically.
+    activity_.noteBleMtu(connInfo.getMTU());
     activity_.enqueueBleConnected();
   }
 
-  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override { activity_.enqueueBleDisconnected(); }
+  void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override { activity_.noteBleMtu(mtu); }
+
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
+    activity_.noteBleMtu(0);
+    activity_.enqueueBleDisconnected();
+  }
 
  private:
   BleTransferActivity& activity_;
@@ -473,9 +516,10 @@ class DataCallbacks final : public NimBLECharacteristicCallbacks {
 }  // namespace
 
 struct BleTransferRuntime {
-  explicit BleTransferRuntime(BleTransferActivity& activity)
-      : serverCallbacks(activity), controlCallbacks(activity), dataCallbacks(activity) {}
+  explicit BleTransferRuntime(BleTransferActivity& owner)
+      : activity(owner), serverCallbacks(owner), controlCallbacks(owner), dataCallbacks(owner) {}
 
+  BleTransferActivity& activity;
   NimBLEServer* server = nullptr;
   NimBLEService* service = nullptr;
   NimBLECharacteristic* status = nullptr;
@@ -484,7 +528,7 @@ struct BleTransferRuntime {
   ControlCallbacks controlCallbacks;
   DataCallbacks dataCallbacks;
 
-  bool begin(BleTransferActivity& activity) {
+  bool begin() {
     NimBLEDevice::init(BLE_DEVICE_NAME);
     NimBLEDevice::setMTU(517);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -504,7 +548,10 @@ struct BleTransferRuntime {
 
     control->setCallbacks(&controlCallbacks);
     dataIn->setCallbacks(&dataCallbacks);
-    status->setValue(activity.buildStatusJson());
+    // The stored value is the authoritative document from the first moment: a
+    // client that reads before it ever sees a notification still gets the whole
+    // truth.
+    status->setValue(activity.buildStatusJson(BleTransferActivity::StatusScope::READ, STATUS_DETAIL_MAX));
 
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(BLE_SERVICE_UUID);
@@ -513,14 +560,32 @@ struct BleTransferRuntime {
     return true;
   }
 
-  void publish(const std::string& json) {
+  void publish(const std::string& readJson, const std::string& notifyJson) {
     if (!status) return;
-    status->setValue(json);
-    status->notify();
+    const size_t notifyCap = activity.notifyCapBytes();
+    const uint16_t mtu = activity.negotiatedMtu_.load(std::memory_order_relaxed);
+    // Two different payloads on one characteristic. setValue() is what a GATT
+    // read returns; notify(buffer, length) sends *that* buffer instead of the
+    // stored value, so the doorbell can be small while the read stays whole.
+    // Confirmed present in the pinned NimBLE-Arduino:
+    //   bool notify(const uint8_t* value, size_t length, uint16_t connHandle) const
+    status->setValue(readJson);
+    LOG_DBG("BLE", "status: notify %u bytes, read %u bytes, cap %u (mtu %u)",
+            static_cast<unsigned>(notifyJson.size()), static_cast<unsigned>(readJson.size()),
+            static_cast<unsigned>(notifyCap), static_cast<unsigned>(mtu));
+    status->notify(reinterpret_cast<const uint8_t*>(notifyJson.data()), notifyJson.size());
   }
 
   void notifyData(const uint8_t* data, const size_t length) {
     if (!dataOut) return;
+    const size_t notifyCap = activity.notifyCapBytes();
+    // The client picks the chunk size and its resume arithmetic depends on it,
+    // so this is never silently shrunk -- but a frame the link cannot carry is
+    // the same class of bug as an overlong status, and must not be silent.
+    if (length > notifyCap) {
+      LOG_DBG("BLE", "data frame %u bytes exceeds notify cap %u", static_cast<unsigned>(length),
+              static_cast<unsigned>(notifyCap));
+    }
     dataOut->setValue(data, length);
     dataOut->notify();
   }
@@ -573,7 +638,7 @@ void BleTransferActivity::onEnter() {
   setState(State::STARTING);
 
   ble_ = std::make_unique<BleTransferRuntime>(*this);
-  if (!ble_->begin(*this)) {
+  if (!ble_->begin()) {
     setError("Could not start BLE");
     return;
   }
@@ -1720,27 +1785,59 @@ void BleTransferActivity::storeFinish() { finish(); }
 
 void BleTransferActivity::storeOpenBook(const std::string& path) { activityManager.goToReader(path); }
 
-void BleTransferActivity::publishStatus() {
-  statusDirty_ = false;
-  if (ble_) ble_->publish(buildStatusJson());
+void BleTransferActivity::noteBleMtu(const uint16_t mtu) { negotiatedMtu_.store(mtu, std::memory_order_relaxed); }
+
+size_t BleTransferActivity::notifyCapBytes() const {
+  uint16_t mtu = negotiatedMtu_.load(std::memory_order_relaxed);
+  // 0 means no exchange has happened (or the peer has gone). Assume the floor
+  // rather than the 517 this server asked for: an optimistic guess here is
+  // exactly how a document ends up truncated on the wire.
+  if (mtu < BLE_ATT_MTU_MINIMUM) mtu = BLE_ATT_MTU_MINIMUM;
+  const size_t cap = static_cast<size_t>(mtu) - BLE_ATT_NOTIFY_OVERHEAD;
+  return cap < BLE_STATUS_NOTIFY_MAX_BYTES ? cap : BLE_STATUS_NOTIFY_MAX_BYTES;
 }
 
-std::string BleTransferActivity::buildStatusJson() const {
+std::string BleTransferActivity::buildNotifyJson(const size_t capBytes) const {
+  for (unsigned detail = STATUS_DETAIL_MAX;; --detail) {
+    std::string json = buildStatusJson(StatusScope::NOTIFY, detail);
+    if (json.size() <= capBytes) return json;
+    if (detail == 0) break;
+  }
+  // Not even `{"state":"..."}` fits -- a 23-byte MTU with a long state name.
+  // An empty object is still a valid document and still rings the doorbell;
+  // truncating one would hand the client a parse error instead.
+  return "{}";
+}
+
+void BleTransferActivity::publishStatus() {
+  statusDirty_ = false;
+  if (!ble_) return;
+  ble_->publish(buildStatusJson(StatusScope::READ, STATUS_DETAIL_MAX), buildNotifyJson(notifyCapBytes()));
+}
+
+std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const unsigned detail) const {
   JsonDocument doc;
   const std::string state = stateName(state_);
-  // A status that carries a `pending` request drops the fields that never change
-  // within a session. A notification is capped at ATT_MTU-3 bytes -- 182 on a
-  // client that negotiates the iOS default -- and the request is the one field
-  // that MUST survive it. The capability lists, the companion URL and the auth
-  // nonce were all read before the gate opened, so nothing is lost. A client
-  // that wants the whole document can always READ the characteristic; the
-  // notification is a doorbell, the read is authoritative.
-  const bool terse = store_ && store_->hasPending();
+  // The notification is a doorbell, the read is authoritative. A READ carries
+  // the whole session; a NOTIFY carries what the client cannot cheaply re-derive
+  // and drops the rest until it fits the ATT payload. Everything dropped here is
+  // still one GATT read away, and the client already has to read to get the
+  // capability lists it saw at connect time.
+  const bool full = (scope == StatusScope::READ);
+  const bool wantSession = full || detail >= 5;   // session-constant capability facts
+  const bool wantIdentity = full || detail >= 4;  // who this device is, and to whom
+  const bool wantProgress = full || detail >= 2;  // byte counters and the error text
+  const bool wantPending = full || detail >= 1;   // the store's request channel
+  // Only below level 3 does the request shed the geometry and the deadline the
+  // app builds its answer from; a GATT read still has them.
+  const bool pendingTerse = !full && detail < 3;
 
   doc["state"] = state.c_str();
-  doc["protocol_version"] = 1;
-  if (!terse) {
+  if (wantSession) doc["protocol_version"] = 1;
+  if (full) {
     doc["firmware_name"] = "CrossPoint Reader";
+    // Read-only by design. A Web Bluetooth companion URL is a session constant
+    // that no notification has any business carrying.
     doc["browser_companion_url"] = BLE_TRANSFER_WEB_URL;
     doc["firmware_ota_supported"] = true;
     doc["resume_supported"] = true;
@@ -1758,30 +1855,33 @@ std::string BleTransferActivity::buildStatusJson() const {
   }
   // The store is a capability of this firmware, not of this screen: an app can
   // see it is supported while the user is still on the transfer screen.
-  doc["store_supported"] = true;
-  if (mode_ == Mode::STORE) doc["mode"] = "store";
-  doc["clock_supported"] = halClock.isAvailable();
-  // Omitted, never zeroed, when the device does not know the time: the client
-  // uses its absence to decide it must send `set_time`, and its value to notice
-  // drift. A `0` here would read as a real 1970 instant.
-  uint32_t deviceEpoch = 0;
-  if (halClock.getEpoch(deviceEpoch)) doc["device_time"] = deviceEpoch;
-  if (!terse) {
+  if (wantSession) doc["store_supported"] = true;
+  if (mode_ == Mode::STORE && wantIdentity) doc["mode"] = "store";
+  if (wantSession) {
+    doc["clock_supported"] = halClock.isAvailable();
+    // Omitted, never zeroed, when the device does not know the time: the client
+    // uses its absence to decide it must send `set_time`, and its value to notice
+    // drift. A `0` here would read as a real 1970 instant.
+    uint32_t deviceEpoch = 0;
+    if (halClock.getEpoch(deviceEpoch)) doc["device_time"] = deviceEpoch;
+  }
+  if (full) {
     doc["device_id"] = deviceId_.c_str();
     doc["device_nonce"] = deviceNonce_.c_str();
     doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
   }
-  if (!trustedHostName_.empty()) doc["trusted_host"] = trustedHostName_.c_str();
-  if (hostPaired_) doc["paired"] = true;
-  if (hostPairSkipped_) doc["pairing"] = "skipped";
-  if (expectedSize_ > 0 || state_ == State::SENDING || state_ == State::SENT) {
+  if (wantIdentity) {
+    if (!trustedHostName_.empty()) doc["trusted_host"] = trustedHostName_.c_str();
+    if (hostPaired_) doc["paired"] = true;
+    if (hostPairSkipped_) doc["pairing"] = "skipped";
+  }
+  if (wantProgress && (expectedSize_ > 0 || state_ == State::SENDING || state_ == State::SENT)) {
     const std::string kind = transferKindName(transferKind_);
     if (!kind.empty()) doc["kind"] = kind.c_str();
     if (state_ == State::SAVED && transferKind_ == TransferKind::PROGRESS) {
       // A finished batch reports its outcome, not its byte count. Kept this
-      // short deliberately: a status notification carries at most ATT_MTU-3
-      // bytes, and the per-entry outcomes are a `progress_result` download
-      // precisely because a shelf-sized array would be truncated in one.
+      // short deliberately: the per-entry outcomes are a `progress_result`
+      // download precisely because a shelf-sized array fits in no notification.
       doc["entries"] = progressEntries_;
       doc["applied"] = progressApplied_;
     } else if (state_ == State::SENDING || state_ == State::SENT) {
@@ -1797,16 +1897,18 @@ std::string BleTransferActivity::buildStatusJson() const {
       doc["size"] = expectedSize_;
     }
   }
-  if (state_ == State::SAVED && !savedPath_.empty()) {
+  if (wantIdentity && state_ == State::SAVED && !savedPath_.empty()) {
     doc["name"] = fileName_.c_str();
     doc["path"] = savedPath_.c_str();
   }
-  if (state_ == State::SENT) doc["name"] = fileName_.c_str();
-  if (state_ == State::ERROR && !errorMessage_.empty()) doc["error"] = errorMessage_.c_str();
+  if (wantIdentity && state_ == State::SENT) doc["name"] = fileName_.c_str();
+  // `state` already says ERROR; the message is the part that can be any length,
+  // so it is the part that goes when the payload is tight.
+  if (wantProgress && state_ == State::ERROR && !errorMessage_.empty()) doc["error"] = errorMessage_.c_str();
   // The request channel. When the device wants something from the app it says so
   // here, and the app answers with an upload naming the same `req`. Absent
   // whenever nothing is outstanding.
-  if (store_) store_->describePending(doc);
+  if (wantPending && store_) store_->describePending(doc, pendingTerse);
 
   String output;
   serializeJson(doc, output);

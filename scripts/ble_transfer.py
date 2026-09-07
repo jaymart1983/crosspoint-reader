@@ -49,6 +49,29 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Fields the reader publishes once per session and omits from a notification --
+# a notification must fit an ATT payload, so it carries only what changed. They
+# are captured from the authoritative GATT read and carried forward.
+SESSION_FACT_KEYS = (
+    "protocol_version",
+    "firmware_name",
+    "browser_companion_url",
+    "firmware_ota_supported",
+    "resume_supported",
+    "upload_kinds",
+    "download_kinds",
+    "store_supported",
+    "clock_supported",
+    "device_id",
+    "device_nonce",
+    "has_trusted_host",
+)
+
+
+def session_facts(status: dict[str, Any]) -> dict[str, Any]:
+    return {key: status[key] for key in SESSION_FACT_KEYS if key in status}
+
+
 def decode_status(data: bytearray | bytes) -> dict[str, Any]:
     try:
         return json.loads(bytes(data).decode("utf-8"))
@@ -284,6 +307,7 @@ async def put_file(args: argparse.Namespace, *, kind: str, suffix: str, success_
     size = source.stat().st_size
     digest = sha256_file(source)
     final_status: dict[str, Any] = {}
+    session_constants: dict[str, Any] = {}
     status_version = 0
     status_event = asyncio.Event()
     done = asyncio.Event()
@@ -296,7 +320,9 @@ async def put_file(args: argparse.Namespace, *, kind: str, suffix: str, success_
 
     def on_status(_: Any, data: bytearray) -> None:
         nonlocal final_status, progress_state, status_version
-        final_status = decode_status(data)
+        # The notification is a doorbell and only carries what fits an ATT
+        # payload; the session facts came from the read and still hold.
+        final_status = {**session_constants, **decode_status(data)}
         status_version += 1
         state = final_status.get("state", "?")
         current = final_status.get("received", final_status.get("written"))
@@ -347,7 +373,10 @@ async def put_file(args: argparse.Namespace, *, kind: str, suffix: str, success_
     try:
         async with BleakClient(device, timeout=args.connect_timeout) as client:
             await client.start_notify(STATUS_UUID, on_status)
+            # The read is authoritative: it returns the whole document, including
+            # the fields no notification is large enough to carry.
             final_status = decode_status(await client.read_gatt_char(STATUS_UUID))
+            session_constants = session_facts(final_status)
             status_version += 1
             status_event.set()
 
@@ -437,6 +466,7 @@ async def get_crash_report(args: argparse.Namespace) -> int:
     target = Path(args.output).expanduser().resolve()
     part = target.with_suffix(target.suffix + ".part")
     final_status: dict[str, Any] = {}
+    session_constants: dict[str, Any] = {}
     status_version = 0
     status_event = asyncio.Event()
     done = asyncio.Event()
@@ -449,7 +479,9 @@ async def get_crash_report(args: argparse.Namespace) -> int:
 
     def on_status(_: Any, data: bytearray) -> None:
         nonlocal final_status, status_version
-        final_status = decode_status(data)
+        # The notification is a doorbell and only carries what fits an ATT
+        # payload; the session facts came from the read and still hold.
+        final_status = {**session_constants, **decode_status(data)}
         status_version += 1
         state = final_status.get("state", "?")
         sent = final_status.get("sent")
@@ -504,7 +536,10 @@ async def get_crash_report(args: argparse.Namespace) -> int:
             client_ref["client"] = client
             await client.start_notify(STATUS_UUID, on_status)
             await client.start_notify(DATA_OUT_UUID, handle_data)
+            # The read is authoritative: it returns the whole document, including
+            # the fields no notification is large enough to carry.
             final_status = decode_status(await client.read_gatt_char(STATUS_UUID))
+            session_constants = session_facts(final_status)
             status_version += 1
             status_event.set()
 
