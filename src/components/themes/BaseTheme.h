@@ -277,20 +277,10 @@ class BaseTheme {
   static void drawBatteryOutline(const GfxRenderer& renderer, int x, int y, int battWidth, int rectHeight);
   static void drawBatteryLightningBolt(const GfxRenderer& renderer, int boltX, int boltY);
 
-  /// How the BLE radio is doing, for the header indicator.
+  /// A header status word ("BLE", "USB"), struck through when \p slashed.
   ///
-  /// "Paired" is deliberately not one of these. A saved trusted host says who
-  /// may connect, not whether anybody is connected now -- and the whole point
-  /// of showing this is to tell those two apart at a glance.
-  enum class BleIndicator : uint8_t {
-    Off,            ///< radio down (asleep, recovery boot, or capability off)
-    Advertising,    ///< up and discoverable, nothing attached
-    PeerUnverified, ///< a phone is on the link but has not passed the hello gate
-    Linked,         ///< connected and authenticated: the Store will answer
-  };
-  static constexpr int bluetoothGlyphWidth = 9;
-  /// The Bluetooth rune, drawn from primitives. Inverted on a filled ground for
-  /// [BleIndicator::Linked] and struck through for [BleIndicator::Off], so the
-  /// four states differ in shape and not only in a detail the panel may lose.
-  static void drawBluetoothGlyph(const GfxRenderer& renderer, int x, int y, int w, int h, BleIndicator state);
+  /// Text rather than a drawn icon, in the same face as the battery percent it
+  /// sits beside, so the two share a baseline by construction instead of being
+  /// aligned by hand. \p centerY is the optical centre to sit on.
+  static void drawStatusLabel(const GfxRenderer& renderer, int x, int centerY, const char* text, bool slashed);
 };
