@@ -208,13 +208,13 @@ void BaseTheme::drawTouchBackButton(const GfxRenderer& renderer) {
   const char* label = I18N.get(StrId::STR_BACK);
   const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
   const int textHeight = renderer.getTextHeight(UI_10_FONT_ID);
-  // drawText's Y is a BASELINE, not a top edge -- see the textYOffset comment in
-  // drawButtonHints below. Centring the text box and passing that as the baseline
-  // pushed the glyphs down by their full height, so "Back" sat on the bottom rule
-  // with all the slack above it. Add textHeight to land the baseline under a
-  // vertically centred box.
+  // drawText's Y is the TOP of the text box -- it adds the ascender itself
+  // (GfxRenderer.cpp: yPos = y + getFontAscenderSize). getTextHeight returns the
+  // ascender, which is taller than the cap height of a string like "Back", so a
+  // straight centre of that box reads slightly bottom-heavy; the 32px chip gives
+  // it room. Do NOT add textHeight here -- that draws the glyphs below the chip.
   renderer.drawText(UI_10_FONT_ID, rect.x + (rect.width - textWidth) / 2,
-                    rect.y + (rect.height + textHeight) / 2, label);
+                    rect.y + (rect.height - textHeight) / 2, label);
   setTouchBackButtonVisible(true);
 }
 
