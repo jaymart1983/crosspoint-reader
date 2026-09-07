@@ -1,5 +1,6 @@
 #pragma once
 #include <ArduinoJson.h>
+#include <BoardConfig.h>
 #include <Epub/ReaderRenderSpec.h>
 #include <PersistableStore.h>
 
@@ -130,7 +131,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     REFRESH_FREQUENCY_COUNT
   };
 
-  // Short power button press actions
+  // Short power button press actions. Persisted by index, so a new action MUST
+  // be appended at the END here and at the end of the matching enumValues array
+  // in SettingsList.h -- otherwise stored indices shift under existing saves.
+  // The LONG press is not part of this enum: it always sleeps the device.
   enum SHORT_PWRBTN {
     IGNORE = 0,
     SLEEP = 1,
@@ -138,8 +142,17 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     FORCE_REFRESH = 3,
     FOOTNOTES = 4,
     PWR_CONFIRM = 5,
+    TOGGLE_LIGHT = 6,
     SHORT_PWRBTN_COUNT
   };
+
+  // What the capacitive Home key does on boards that have one. Default keeps
+  // the historical behaviour (tap = Home, hold = the reader long-press action).
+  // TOUCH_REBOOT turns the key into the device's hardware-utility key: tap
+  // toggles the touchscreen, hold reboots. The physical "Reset" pinhole on the
+  // Xteink chassis is wired to the ESP32 EN line and is invisible to firmware,
+  // so this key is the only place those two actions can live.
+  enum HOME_KEY_ACTION { HOME_KEY_HOME = 0, HOME_KEY_TOUCH_REBOOT = 1, HOME_KEY_ACTION_COUNT };
 
   // Long-press Confirm action while reading an EPUB. The setting cycles through these values.
   // Persisted in settings.json by index: any new function (e.g. dictionary, bookmark) MUST use a
@@ -227,8 +240,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = 1;
-  // Short power button click behaviour
-  uint8_t shortPwrBtn = IGNORE;
+  // Short power button click behaviour. Boards with a frontlight default to
+  // toggling it -- on a touch-first device that is the one thing the power
+  // button is reached for most, and the long press still sleeps.
+  uint8_t shortPwrBtn = FREEINK_CAP_FRONTLIGHT ? TOGGLE_LIGHT : IGNORE;
+  // Capacitive Home key behaviour (HOME_KEY_ACTION).
+  uint8_t homeKeyAction = HOME_KEY_HOME;
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
   uint8_t orientation = PORTRAIT;

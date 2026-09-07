@@ -164,6 +164,17 @@ void FrontlightPanelActivity::runTile(const int idx) {
       // screens the panel opens over. The reader reflows on its next loop().
       requestUpdate();
       break;
+    // The two navigation tiles replace the whole stack rather than popping:
+    // the panel opens over any screen, so "Settings" and "Home" must be
+    // absolute destinations, not a step back into whatever was underneath.
+    // replaceActivity() runs this activity's onExit(), so the live
+    // brightness/warmth still persist on the way out.
+    case 4:  // Settings
+      activityManager.goToSettings();
+      break;
+    case 5:  // Home
+      activityManager.goHome();
+      break;
     case 3:  // Touch reader controls (for reading with the palm on the glass)
       // Toggles the existing Settings -> Controls option, nothing lower-level:
       // that setting only governs the reader's tap/swipe handling, so the
@@ -387,12 +398,14 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
     snprintf(touchLabel, sizeof(touchLabel), "%s %s", tr(STR_TOUCH_TOGGLE),
              I18N.get(touchOn ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF));
 
-    const char* labels[kTileCount] = {tr(STR_NIGHT_MODE), tr(STR_FORCE_REFRESH), orientLabel, touchLabel};
+    const char* labels[kTileCount] = {tr(STR_NIGHT_MODE), tr(STR_FORCE_REFRESH), orientLabel, touchLabel,
+                                      tr(STR_SETTINGS_TITLE), tr(STR_EOB_HOME)};
     const fui::State states[kTileCount] = {SETTINGS.screenInverted ? fui::StateChecked : fui::StateNormal,
                                            fui::StateNormal, fui::StateNormal,
                                            // Filled when touch reader controls are OFF — the non-default,
                                            // attention-worthy state.
-                                           touchOn ? fui::StateNormal : fui::StateChecked};
+                                           touchOn ? fui::StateNormal : fui::StateChecked, fui::StateNormal,
+                                           fui::StateNormal};
 
     for (int id = 0; id < kTileCount; ++id) {
       gridItems[id].label = labels[id];

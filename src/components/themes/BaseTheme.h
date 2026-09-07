@@ -224,8 +224,24 @@ class BaseTheme {
   void drawBatteryLeft(const GfxRenderer& renderer, Rect rect,
                        bool showPercentage = true) const;  // Left aligned (reader mode)
   virtual void fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const;
+  // touchBack: on touch boards the four physical hints are replaced by a
+  // single persistent on-screen Back chip. Pass false on screens where Back
+  // has no meaning (the Home screen is the navigation root).
   virtual void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                               const char* btn4) const;
+                               const char* btn4, bool touchBack = true) const;
+  // --- Persistent on-screen Back chip (touch boards) --------------------------
+  // The X4 Pro and the other touch boards have no physical Back key, so the
+  // bottom hint band -- which those boards used to collapse to zero -- carries
+  // a single Back chip instead. Drawing it publishes touchBackButtonVisible()
+  // so MappedInputManager can route a tap in its rect to logical Back without
+  // every activity growing its own hit test. ActivityManager clears the flag
+  // before each render, so a screen that draws no hints (the reader page)
+  // exposes no chip.
+  static Rect touchBackButtonRect(const GfxRenderer& renderer);
+  static Rect touchBackButtonHitRect(const GfxRenderer& renderer);
+  static void drawTouchBackButton(const GfxRenderer& renderer);
+  static bool touchBackButtonVisible();
+  static void setTouchBackButtonVisible(bool visible);
   // Shared by every theme's drawButtonHints(): centres a hint label in its box,
   // wrapping to two lines rather than overflowing when it's too wide to fit.
   static void drawHintLabel(const GfxRenderer& renderer, int fontId, const char* label, int x, int boxWidth, int boxTop,

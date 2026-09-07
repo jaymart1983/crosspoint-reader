@@ -59,9 +59,11 @@ const ThemeMetrics& UITheme::getMetrics() const {
   const bool touch = gpio.hasTouch();
   if (!metricsValid || touch != metricsForTouch) {
     adjustedMetrics = *currentMetrics;
-    if (touch) {
-      adjustedMetrics.buttonHintsHeight = 0;
-    }
+    // Touch boards used to collapse the hint band to zero (there are no
+    // physical Back/Confirm/Up/Down keys to label). The band is now the home
+    // of the persistent on-screen Back chip (BaseTheme::drawTouchBackButton),
+    // so it keeps its height and every screen that already reserved
+    // buttonHintsHeight at the bottom reserves the chip's band for free.
     metricsForTouch = touch;
     metricsValid = true;
   }

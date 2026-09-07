@@ -3,15 +3,19 @@
 #include <BoardConfig.h>
 #include <FreeInkUICore.h>
 #include <GfxRenderer.h>
-#include <HalFrontlight.h>
 
 #include <algorithm>
 #include <cstdlib>
 
 #include "CrossPointSettings.h"
 #include "components/UITheme.h"
+#include "components/themes/BaseTheme.h"
 
 namespace fui = freeink::ui;
+
+// Runtime-only touchscreen gate; always starts enabled on boot/wake. See the
+// header for why this is never persisted.
+bool MappedInputManager::touchInputEnabled = true;
 
 void MappedInputManager::update() const {
   gpio.update();
@@ -140,6 +144,7 @@ void MappedInputManager::rememberTouchHeldTime() const {
 }
 
 bool MappedInputManager::wasScreenTapped(int& x, int& y) const {
+  if (!touchInputEnabled) return false;
   float nx = 0.0f;
   float ny = 0.0f;
   if (!gpio.wasTouchTap(nx, ny)) return false;
@@ -149,6 +154,7 @@ bool MappedInputManager::wasScreenTapped(int& x, int& y) const {
 }
 
 bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {
+  if (!touchInputEnabled) return false;
   float nx = 0.0f;
   float ny = 0.0f;
   unsigned long heldMs = 0;
@@ -159,6 +165,7 @@ bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {
 }
 
 bool MappedInputManager::wasScreenLongPress(int& x, int& y) const {
+  if (!touchInputEnabled) return false;
   float nx = 0.0f;
   float ny = 0.0f;
   if (!gpio.wasTouchLongPress(nx, ny)) return false;
@@ -170,6 +177,7 @@ bool MappedInputManager::wasScreenLongPress(int& x, int& y) const {
 }
 
 bool MappedInputManager::isScreenTouchHeld(int& x, int& y) const {
+  if (!touchInputEnabled) return false;
   // Live contact position while the finger is down (no tap-slop gate) — drag tracking.
   float nx = 0.0f;
   float ny = 0.0f;
@@ -178,7 +186,19 @@ bool MappedInputManager::isScreenTouchHeld(int& x, int& y) const {
   return true;
 }
 
-bool MappedInputManager::wasScreenTouchReleased() const { return gpio.wasTouchReleased(); }
+bool MappedInputManager::wasScreenTouchReleased() const {
+  return touchInputEnabled && gpio.wasTouchReleased();
+}
+
+bool MappedInputManager::wasBackButtonTap() const {
+  // Only live while the current frame actually painted the chip: the flag is
+  // cleared before every activity render and set by the theme that draws it,
+  // so a screen without the chip (the reader page) can never route a stray
+  // bottom-left tap into Back.
+  if (!BaseTheme::touchBackButtonVisible()) return false;
+  const Rect rect = BaseTheme::touchBackButtonHitRect(renderer);
+  return wasTapInRect(rect.x, rect.y, rect.width, rect.height);
+}
 
 bool MappedInputManager::wasTapInRect(const int x, const int y, const int width, const int height) const {
   int tx = 0;
@@ -225,6 +245,7 @@ MappedInputManager::RowTouch MappedInputManager::colTouch(int& col, const int le
 }
 
 bool MappedInputManager::decodeSwipe(int& sx, int& sy, int& ex, int& ey) const {
+  if (!touchInputEnabled) return false;
   float nxs = 0.0f;
   float nys = 0.0f;
   float nxe = 0.0f;
@@ -284,15 +305,19 @@ bool MappedInputManager::wasMenuGesture() const { return wasTopEdgeDownSwipe(); 
 
 bool MappedInputManager::wasReaderMenuSwipeUp() const { return gpio.hasHomeKey() && wasBottomEdgeUpSwipe(); }
 
-bool MappedInputManager::wasHomeGesture() const {
-  return gpio.hasHomeKey() ? gpio.wasHomeKeyTapped() : wasBottomEdgeUpSwipe();
+// A Home key remapped to the hardware-utility role (touch toggle / reboot) is
+// owned by main.cpp's global handler, so it must not also navigate.
+static bool homeKeyNavigates() {
+  return SETTINGS.homeKeyAction == CrossPointSettings::HOME_KEY_ACTION::HOME_KEY_HOME;
 }
 
-bool MappedInputManager::wasHomeKeyHold() const { return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed(); }
+bool MappedInputManager::wasHomeGesture() const {
+  if (!gpio.hasHomeKey()) return wasBottomEdgeUpSwipe();
+  return homeKeyNavigates() && gpio.wasHomeKeyTapped();
+}
 
-bool MappedInputManager::wasLightPanelGesture() const {
-  // On lightless boards the same edge remains available to the reader menu.
-  return Frontlight.present() && wasTopEdgeDownSwipe();
+bool MappedInputManager::wasHomeKeyHold() const {
+  return gpio.hasHomeKey() && homeKeyNavigates() && gpio.wasHomeKeyLongPressed();
 }
 
 #if FREEINK_CAP_TOUCH
@@ -306,7 +331,7 @@ bool MappedInputManager::wasPowerConfirmClick() const {
 #endif
 
 bool MappedInputManager::wasPressed(const Button button) const {
-  if (button == Button::Back && wasBackGesture()) return true;
+  if (button == Button::Back && (wasBackGesture() || wasBackButtonTap())) return true;
 #if FREEINK_CAP_TOUCH
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
 #endif
@@ -314,7 +339,7 @@ bool MappedInputManager::wasPressed(const Button button) const {
 }
 
 bool MappedInputManager::wasReleased(const Button button) const {
-  if (button == Button::Back && wasBackGesture()) return true;
+  if (button == Button::Back && (wasBackGesture() || wasBackButtonTap())) return true;
 #if FREEINK_CAP_TOUCH
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
 #endif

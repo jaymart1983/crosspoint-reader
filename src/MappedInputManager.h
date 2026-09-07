@@ -40,6 +40,19 @@ class MappedInputManager {
   MappedInputManager(HalGPIO& gpio, const GfxRenderer& renderer) : gpio(gpio), renderer(renderer) {}
 
   void update() const;
+
+  // --- Touchscreen master gate ------------------------------------------------
+  // Runtime-only (never persisted): a board whose glass is switched off must
+  // always come back with touch alive after a reboot or a wake, otherwise a
+  // touch-first device like the X4 Pro can lock its owner out of the UI. The
+  // capacitive Home key is deliberately NOT gated -- it is the physical key
+  // that toggles this back on.
+  static bool isTouchInputEnabled() { return touchInputEnabled; }
+  static void setTouchInputEnabled(const bool enabled) { touchInputEnabled = enabled; }
+  static bool toggleTouchInput() {
+    touchInputEnabled = !touchInputEnabled;
+    return touchInputEnabled;
+  }
 #if FREEINK_CAP_TOUCH
   // X4 Pro delays a single power click until its frontlight double-click window
   // expires. The main loop supplies that one-frame event here.
@@ -67,6 +80,10 @@ class MappedInputManager {
   // off-target so FreeInkUI routing clears its pressed-element state.
   bool wasScreenTouchReleased() const;
   bool wasTapInRect(int x, int y, int width, int height) const;
+  // Tap on the persistent on-screen Back chip the themes paint on touch boards
+  // (see BaseTheme::drawTouchBackButton). Folded into Button::Back below so
+  // every activity's existing Back handling picks it up unchanged.
+  bool wasBackButtonTap() const;
 
   // Combined touch interaction for a band of equal rows with caller-supplied
   // geometry — the shared hit-test for lists the theme helpers above do not
@@ -96,9 +113,6 @@ class MappedInputManager {
   // key and the bottom edge is free; elsewhere the same swipe is the Home
   // gesture and this returns false.
   bool wasReaderMenuSwipeUp() const;
-  // Top-edge down-swipe opens the light panel when the active board actually
-  // has a frontlight. ActivityManager consumes it before activity input.
-  bool wasLightPanelGesture() const;
   bool wasAnyPressed() const;
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
@@ -139,6 +153,8 @@ class MappedInputManager {
 #endif
   void rememberTouchHeldTime() const;
   void suppressNextRelease(Button button) const;
+
+  static bool touchInputEnabled;
 
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;

@@ -2,6 +2,7 @@
 
 #include <BoardConfig.h>
 #include <HalClock.h>
+#include <HalFrontlight.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <SdCardFontRegistry.h>
@@ -178,6 +179,20 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
   return s;
 }
 
+// Short power-button actions, in enum order (CrossPointSettings::SHORT_PWRBTN).
+// PWR_CONFIRM only makes sense where there is no physical Confirm key, and
+// TOGGLE_LIGHT only on boards that actually have a frontlight -- but both sit
+// at fixed indices, so the list is truncated from the end rather than reordered.
+inline std::vector<StrId> buildShortPwrBtnValues() {
+  static constexpr StrId VALUES[] = {StrId::STR_IGNORE,    StrId::STR_SLEEP,   StrId::STR_PAGE_TURN,
+                                     StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES, StrId::STR_CONFIRM,
+                                     StrId::STR_FRONTLIGHT};
+  size_t count = static_cast<size_t>(CrossPointSettings::PWR_CONFIRM);  // IGNORE..FOOTNOTES
+  if (BoardConfig::hasTouch()) count = static_cast<size_t>(CrossPointSettings::TOGGLE_LIGHT);
+  if (Frontlight.present()) count = std::size(VALUES);
+  return {VALUES, VALUES + count};
+}
+
 inline std::vector<StrId> buildLongPressMenuValues() {
   static constexpr StrId VALUES[] = {StrId::STR_KOSYNC, StrId::STR_DISABLED, StrId::STR_BOOKMARK_OPTION,
                                      StrId::STR_DICTIONARY, StrId::STR_READER_MENU};
@@ -319,17 +334,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           "longPressButtonBehavior", StrId::STR_CAT_CONTROLS),
         SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::longPressMenuFunction,
                           buildLongPressMenuValues(), "longPressMenuFunction", StrId::STR_CAT_CONTROLS),
-#if FREEINK_CAP_TOUCH
-        SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
-                          {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH,
-                           StrId::STR_FOOTNOTES, StrId::STR_CONFIRM},
+        SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn, buildShortPwrBtnValues(),
                           "shortPwrBtn", StrId::STR_CAT_CONTROLS),
-#else
-        SettingInfo::Enum(
-            StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
-            {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES},
-            "shortPwrBtn", StrId::STR_CAT_CONTROLS),
-#endif
+        // Home-key remap: only offered where a capacitive Home key exists.
+        SettingInfo::Enum(StrId::STR_HOME_KEY_ACTION, &CrossPointSettings::homeKeyAction,
+                          BoardConfig::hasHomeKey()
+                              ? std::vector<StrId>{StrId::STR_HOME_KEY_HOME, StrId::STR_HOME_KEY_TOUCH_REBOOT}
+                              : std::vector<StrId>{StrId::STR_HOME_KEY_HOME},
+                          "homeKeyAction", StrId::STR_CAT_CONTROLS),
         SettingInfo::Toggle(StrId::STR_PWR_BTN_FOOTNOTE_BACK, &CrossPointSettings::pwrBtnFootnoteBack,
                             "pwrBtnFootnoteBack", StrId::STR_CAT_CONTROLS),
         SettingInfo::Toggle(StrId::STR_BACK_SHORT_TO_FILE_BROWSER, &CrossPointSettings::backShortToFileBrowser,

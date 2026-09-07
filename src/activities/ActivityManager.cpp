@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "CrossPointSettings.h"
+#include "components/themes/BaseTheme.h"
 #include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
@@ -57,6 +58,10 @@ void ActivityManager::renderTaskLoop() {
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;
+    // The persistent on-screen Back chip is opt-in per frame: clear it here so
+    // only an activity whose render actually paints it (via drawButtonHints)
+    // exposes a Back hit rect to the loop task.
+    BaseTheme::setTouchBackButtonVisible(false);
     if (currentActivity) {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
       // Night mode is a global output polarity applied to every activity.
@@ -99,19 +104,23 @@ void ActivityManager::loop() {
       return;
     }
 
-    // Tap-first control-center entry: a tap on the status-bar band of the
-    // top-level tab screens opens it, mirroring the top-edge swipe (which some
-    // panels' etched glass makes unreliable). The reader keeps its clean page
-    // (no status bar there to tap). Touch boards only, like the swipe itself.
-    bool statusBarTap = false;
+    // Control-center entry: a tap on the TOP-CENTRE of the status-bar band of
+    // the top-level screens opens it. Deliberately touch-only and centre-only:
+    // the top-edge down-swipe that used to open it as well is gone (it fought
+    // the etched glass, and a swipe that opens a menu is undiscoverable), and
+    // the left/right thirds of the band stay free for a screen's own chrome.
+    // The reader keeps its clean page (no status bar there to tap).
+    bool controlCenterTap = false;
     if (mappedInput.hasTouch() &&
         (currentActivity->name == "Home" || currentActivity->name == "FileBrowser" ||
          currentActivity->name == "Settings" || currentActivity->name == "NetworkModeSelection")) {
       int tx = 0;
       int ty = 0;
-      statusBarTap = mappedInput.wasScreenTapped(tx, ty) && ty < 44;
+      const int width = renderer.getScreenWidth();
+      controlCenterTap =
+          mappedInput.wasScreenTapped(tx, ty) && ty < 44 && tx >= width / 3 && tx < (width * 2) / 3;
     }
-    if (currentActivity->name != "FrontlightPanel" && (statusBarTap || mappedInput.wasLightPanelGesture())) {
+    if (currentActivity->name != "FrontlightPanel" && controlCenterTap) {
       pushActivity(std::make_unique<FrontlightPanelActivity>(renderer, mappedInput));
       return;
     }

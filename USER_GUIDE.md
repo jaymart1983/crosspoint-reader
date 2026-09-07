@@ -75,8 +75,8 @@ Alternatively, while reading a book, press the **Confirm** button to open the re
 
 The X4 Pro has a built-in frontlight with adjustable brightness and warmth. It is controlled from a swipe panel rather than the Settings menu:
 
-* **Open the frontlight panel:** Swipe down from the top edge of the screen, from almost any screen (Home, Browse Files, Reading Mode, etc.). Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off.
-* **Quick toggle:** Double-click the **Power** button to turn the frontlight on or off instantly, without opening the panel.
+* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, Touch, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
+* **Quick toggle:** With **Short Power Button Click** set to **Frontlight** (the default on the X4 Pro), a short press of the **Power** button turns the frontlight on or off; a long press still puts the device to sleep.
 
 > [!NOTE]
 > Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the swipe panel is the only place to adjust them. The on/off state can also be toggled with the Power-button double-click above.
@@ -93,6 +93,8 @@ To turn the device on or off, **press and hold the Power button for approximatel
 In the **[Controls Settings](#363-controls)** you can configure the power button to turn the device off with a short press instead of a long one.
 
 To reboot the device (for example after a firmware update or if it's frozen), press and release the Reset button, and then quickly press and hold the Power button for a few seconds.
+
+On boards with a capacitive **Home** key (X4 Pro), **Controls -> Home Key** can switch that key from **Go Home** to **Touch / Reboot**: a tap then turns the touchscreen off and on again (useful when resting a palm on the glass), and a hold reboots the device. The touchscreen always comes back enabled after a reboot or a wake, so this can never lock you out.
 
 ### First Launch
 

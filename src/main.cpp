@@ -205,7 +205,60 @@ void restartToHomeAfterStorageHandoff() {
   ESP.restart();
 }
 
+// Flip the frontlight and persist the new on/off preference. Shared by the
+// X4 Pro power double-click and the SHORT_PWRBTN::TOGGLE_LIGHT single click.
+static void toggleFrontlightAndPersist() {
+  const bool lightOn = !Frontlight.isOn();
+  Frontlight.setOn(lightOn);
+  SETTINGS.frontlightOn = lightOn ? 1 : 0;
+  SETTINGS.saveToFile();
+  LOG_INF("LIGHT", "Frontlight toggled %s by power button", lightOn ? "on" : "off");
+}
+
+// Full reboot, splash and all -- deliberately NOT silentRestart(), which is the
+// heap-defrag path that suppresses the boot screen.
+static void rebootDevice() {
+  LOG_INF("MAIN", "Reboot requested");
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  delay(50);
+  ESP.restart();
+}
+
+// The capacitive Home key, when remapped to the hardware-utility role: a tap
+// toggles the touchscreen (palm rejection while reading), a hold reboots. The
+// chassis "Reset" pinhole is wired to the ESP32 EN line and never reaches
+// firmware, so this key is where those two actions live. Returns true when the
+// key consumed the frame.
+static bool handleUtilityHomeKey() {
+  if (!BoardConfig::hasHomeKey() ||
+      SETTINGS.homeKeyAction != CrossPointSettings::HOME_KEY_ACTION::HOME_KEY_TOUCH_REBOOT) {
+    return false;
+  }
+  if (gpio.wasHomeKeyLongPressed()) {
+    rebootDevice();
+    return true;
+  }
+  if (gpio.wasHomeKeyTapped()) {
+    const bool enabled = MappedInputManager::toggleTouchInput();
+    LOG_INF("TOUCH", "Touchscreen %s by Home key", enabled ? "enabled" : "disabled");
+    char message[48];
+    snprintf(message, sizeof(message), "%s %s", tr(STR_TOUCH_TOGGLE),
+             I18N.get(enabled ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF));
+    {
+      RenderLock lock;
+      GUI.drawPopup(renderer, message);
+    }
+    delay(600);
+    activityManager.requestUpdate();
+    return true;
+  }
+  return false;
+}
+
 bool handleX4ProFrontlightDoubleClick() {
+  // A single click already toggles the light in this mode, so the double-click
+  // shortcut would just toggle it straight back.
+  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::TOGGLE_LIGHT) return false;
   if (!BoardConfig::isX4Pro() || !gpio.wasReleased(HalGPIO::BTN_POWER)) {
     return false;
   }
@@ -222,11 +275,7 @@ bool handleX4ProFrontlightDoubleClick() {
   }
 
   lastX4ProPowerClickAt = 0;
-  const bool lightOn = !Frontlight.isOn();
-  Frontlight.setOn(lightOn);
-  SETTINGS.frontlightOn = lightOn ? 1 : 0;
-  SETTINGS.saveToFile();
-  LOG_INF("LIGHT", "Frontlight toggled %s by power-button double-click", lightOn ? "on" : "off");
+  toggleFrontlightAndPersist();
   return true;
 }
 
@@ -643,6 +692,8 @@ void loop() {
     return;
   }
 
+  if (handleUtilityHomeKey()) return;
+
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
   if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_DOWN)) {
@@ -721,6 +772,14 @@ void loop() {
     return;
   }
 #endif
+
+  // Toggle the frontlight on a short power click. The long press above already
+  // sleeps the device, so the two power-button gestures never collide.
+  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::TOGGLE_LIGHT && Frontlight.present() &&
+      mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
+    toggleFrontlightAndPersist();
+    return;
+  }
 
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&

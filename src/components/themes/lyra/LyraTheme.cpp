@@ -103,8 +103,9 @@ void LyraTheme::drawSubHeader(const GfxRenderer& renderer, Rect rect, const char
 }
 
 void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                const char* btn4) const {
+                                const char* btn4, const bool touchBack) const {
   if (gpio.hasTouch()) {
+    if (touchBack) drawTouchBackButton(renderer);
     return;
   }
 

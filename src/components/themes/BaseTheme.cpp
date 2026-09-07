@@ -9,6 +9,7 @@
 #include <Logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -166,9 +167,56 @@ void BaseTheme::drawHintLabel(const GfxRenderer& renderer, const int fontId, con
   }
 }
 
+namespace {
+// Chip geometry, in the CURRENT orientation: a touch user reads "bottom left of
+// what I am looking at", not "bottom left of the portrait panel".
+constexpr int kBackChipWidth = 108;
+constexpr int kBackChipMargin = 8;
+// Extra slop so the chip clears the 44px touch-target guidance even though the
+// hint band itself is 40px tall.
+constexpr int kBackChipHitPadding = 6;
+std::atomic<bool> backChipVisible{false};
+}  // namespace
+
+Rect BaseTheme::touchBackButtonRect(const GfxRenderer& renderer) {
+  // The band the active theme reserves at the bottom of every screen (see
+  // UITheme::getMetrics), so the chip always lands inside reserved space.
+  const int band = UITheme::getInstance().getMetrics().buttonHintsHeight;
+  const int height = band - 2 * kBackChipMargin;
+  return Rect{kBackChipMargin, renderer.getScreenHeight() - band + kBackChipMargin, kBackChipWidth,
+              height > 0 ? height : band};
+}
+
+Rect BaseTheme::touchBackButtonHitRect(const GfxRenderer& renderer) {
+  const Rect r = touchBackButtonRect(renderer);
+  return Rect{r.x - kBackChipHitPadding, r.y - kBackChipHitPadding, r.width + 2 * kBackChipHitPadding,
+              r.height + 2 * kBackChipHitPadding};
+}
+
+bool BaseTheme::touchBackButtonVisible() { return backChipVisible.load(std::memory_order_relaxed); }
+
+void BaseTheme::setTouchBackButtonVisible(const bool visible) {
+  backChipVisible.store(visible, std::memory_order_relaxed);
+}
+
+void BaseTheme::drawTouchBackButton(const GfxRenderer& renderer) {
+  const Rect rect = touchBackButtonRect(renderer);
+  // White fill first: the chip floats over whatever the screen drew underneath
+  // and must stay legible on a busy list.
+  renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);
+  renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 1, 6, true);
+  const char* label = I18N.get(StrId::STR_BACK);
+  const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
+  const int textHeight = renderer.getTextHeight(UI_10_FONT_ID);
+  renderer.drawText(UI_10_FONT_ID, rect.x + (rect.width - textWidth) / 2,
+                    rect.y + (rect.height - textHeight) / 2, label);
+  setTouchBackButtonVisible(true);
+}
+
 void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                const char* btn4) const {
+                                const char* btn4, const bool touchBack) const {
   if (gpio.hasTouch()) {
+    if (touchBack) drawTouchBackButton(renderer);
     return;
   }
 
