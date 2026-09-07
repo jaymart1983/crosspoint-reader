@@ -560,6 +560,26 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   }
 }
 
+// Cold half of drawPixel's bounds check. The first clipped pixel of a frame
+// names the offending coordinate (logical and physical, so the orientation is
+// readable from the log); the rest are counted and summarised by
+// reportClippedPixels() when the frame is pushed.
+void __attribute__((noinline)) GfxRenderer::noteClippedPixel(const int x, const int y, const int phyX,
+                                                             const int phyY) const {
+  if (clippedPixels_ == 0) {
+    LOG_ERR("GFX", "!! Outside range (%d, %d) -> (%d, %d) -- clipped", x, y, phyX, phyY);
+  }
+  clippedPixels_++;
+}
+
+void GfxRenderer::reportClippedPixels() const {
+  if (clippedPixels_ > 1) {
+    LOG_ERR("GFX", "!! %lu more pixels clipped outside the panel in this frame",
+            static_cast<unsigned long>(clippedPixels_ - 1));
+  }
+  clippedPixels_ = 0;
+}
+
 // IMPORTANT: This function is in critical rendering path and is called for every pixel. Please keep it as simple and
 // efficient as possible.
 void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
@@ -569,9 +589,11 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
   // Note: this call should be inlined for better performance
   rotateCoordinates(orientation, x, y, &phyX, &phyY, panelWidth, panelHeight);
 
-  // Bounds checking against runtime panel dimensions
+  // Bounds checking against runtime panel dimensions. A layout that runs off
+  // the panel is clipped here rather than drawn, and reported once per frame
+  // instead of once per pixel (see noteClippedPixel).
   if (phyX < 0 || phyX >= panelWidth || phyY < 0 || phyY >= panelHeight) {
-    LOG_ERR("GFX", "!! Outside range (%d, %d) -> (%d, %d)", x, y, phyX, phyY);
+    noteClippedPixel(x, y, phyX, phyY);
     return;
   }
 
@@ -1823,11 +1845,13 @@ HalDisplay::RefreshMode GfxRenderer::applyChangeBudget(const HalDisplay::Refresh
 void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
+  reportClippedPixels();
   refreshMode = applyChangeBudget(applyPromotedRefresh(refreshMode));
   display.displayBuffer(refreshMode, fadingFix);
 }
 
 void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {
+  reportClippedPixels();
   refreshMode = applyChangeBudget(applyPromotedRefresh(refreshMode));
   // The async path has no turn-off-screen hook, which the sunlight fading fix
   // relies on; keep those users on the blocking path.

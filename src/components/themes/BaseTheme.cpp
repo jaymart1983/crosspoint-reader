@@ -178,19 +178,38 @@ constexpr int kBackChipHitPadding = 6;
 std::atomic<bool> backChipVisible{false};
 }  // namespace
 
+namespace {
+// Trim a rectangle to the panel. The chip and its hit rect are derived from
+// theme metrics, so a theme whose band does not fit the screen must degrade to
+// a smaller chip rather than to coordinates the renderer has to clip.
+Rect clampToScreen(const GfxRenderer& renderer, const Rect r) {
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+  const int x0 = std::max(0, r.x);
+  const int y0 = std::max(0, r.y);
+  const int x1 = std::min(screenWidth, r.x + r.width);
+  const int y1 = std::min(screenHeight, r.y + r.height);
+  return Rect{x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0)};
+}
+}  // namespace
+
 Rect BaseTheme::touchBackButtonRect(const GfxRenderer& renderer) {
   // The band the active theme reserves at the bottom of every screen (see
   // UITheme::getMetrics), so the chip always lands inside reserved space.
   const int band = UITheme::getInstance().getMetrics().buttonHintsHeight;
   const int height = band - 2 * kBackChipMargin;
-  return Rect{kBackChipMargin, renderer.getScreenHeight() - band + kBackChipMargin, kBackChipWidth,
-              height > 0 ? height : band};
+  return clampToScreen(renderer, Rect{kBackChipMargin, renderer.getScreenHeight() - band + kBackChipMargin,
+                                      kBackChipWidth, height > 0 ? height : band});
 }
 
 Rect BaseTheme::touchBackButtonHitRect(const GfxRenderer& renderer) {
   const Rect r = touchBackButtonRect(renderer);
-  return Rect{r.x - kBackChipHitPadding, r.y - kBackChipHitPadding, r.width + 2 * kBackChipHitPadding,
-              r.height + 2 * kBackChipHitPadding};
+  // The padding is slop for fingers, not a licence to describe a target off the
+  // panel: with a 4px chip margin it would otherwise start at x=-2 and end two
+  // rows below the last one, and a hit rect that does not exist on screen is a
+  // hit rect nobody can aim at.
+  return clampToScreen(renderer, Rect{r.x - kBackChipHitPadding, r.y - kBackChipHitPadding,
+                                      r.width + 2 * kBackChipHitPadding, r.height + 2 * kBackChipHitPadding});
 }
 
 bool BaseTheme::touchBackButtonVisible() { return backChipVisible.load(std::memory_order_relaxed); }
@@ -210,9 +229,15 @@ void BaseTheme::drawTouchBackButton(const GfxRenderer& renderer) {
   const int textHeight = renderer.getTextHeight(UI_10_FONT_ID);
   // drawText's Y is the TOP of the text box -- it adds the ascender itself
   // (GfxRenderer.cpp: yPos = y + getFontAscenderSize). getTextHeight returns the
-  // ascender, which is taller than the cap height of a string like "Back", so a
-  // straight centre of that box reads slightly bottom-heavy; the 32px chip gives
-  // it room. Do NOT add textHeight here -- that draws the glyphs below the chip.
+  // ascender, which is taller than the cap height of a string like "« Back", so
+  // a straight centre of that box reads slightly bottom-heavy; the 32px chip
+  // gives it room. Do NOT add textHeight here -- that draws the glyphs below the
+  // chip, and below the panel with it. Worked through on the 480x800 portrait
+  // frame with UI_10 (ascender 20, cap height 15): chip rows 764..795, this
+  // expression puts the text box at 770..789 and its ink at 775..789, i.e. 11
+  // rows of slack above and 6 below. `+ textHeight` put the baseline at 810 and
+  // the ink at 794..809 -- ten rows past the bottom of the panel, which is the
+  // 309-clipped-pixels-per-frame burst in ble3.log.
   renderer.drawText(UI_10_FONT_ID, rect.x + (rect.width - textWidth) / 2,
                     rect.y + (rect.height - textHeight) / 2, label);
   setTouchBackButtonVisible(true);

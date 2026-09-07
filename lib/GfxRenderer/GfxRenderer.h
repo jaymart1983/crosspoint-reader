@@ -71,6 +71,20 @@ class GfxRenderer {
   // Swap in (and clear) the promoted mode, if one is pending.
   HalDisplay::RefreshMode applyPromotedRefresh(HalDisplay::RefreshMode refreshMode) const;
 
+  // --- Out-of-range clipping -----------------------------------------------
+  // A pixel outside the panel is dropped, never wrapped into a neighbouring
+  // row -- see drawPixel(). It is still a bug worth seeing, but reporting it
+  // per pixel makes it unreadable: one text run positioned a line below the
+  // bottom edge is ~300 clipped pixels, repainted on every frame, which is how
+  // 3708 of these lines ended up burying a 240 KB serial log. Only the first
+  // of a frame's burst is printed, with a count at displayBuffer() time.
+  mutable uint32_t clippedPixels_ = 0;
+  // Cold path of drawPixel(), kept out of line so the hot path stays a bounds
+  // test and a call the branch predictor never takes.
+  void noteClippedPixel(int x, int y, int phyX, int phyY) const;
+  // Prints the frame's clipped-pixel count, if any, and resets it.
+  void reportClippedPixels() const;
+
   // --- Change budget (anti-ghosting) ---------------------------------------
   // Ghosting tracks how much ink the panel has moved through DIFFERENTIAL
   // (FAST) waveforms since the last clean one, not how many pages were turned.
