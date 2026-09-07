@@ -174,11 +174,17 @@ inline bool writeAtomicAt(const std::string& cachePath, const uint8_t* data, con
 
 // Saves progress, stamped with the device's own clock.
 //
-// This is the reader's entry point. When the device does not know what time it
-// is (no RTC, or an RTC that was never set -- there is no NTP in a build without
-// the network stack, so the phone has to set it over BLE), any existing stamp is
-// dropped rather than kept: the position is new, the time is not known, and
-// saying "unknown" is the only honest answer.
+// This is the reader's entry point, and on any board with an RTC it always
+// stamps: HalClock::begin() starts a stopped clock at the firmware's build
+// epoch, so the device knows *a* time from its very first boot even before an
+// app sends `set_time`. The stamp may be behind real time until then; it is
+// never absent.
+//
+// The clearSavedTime() path is the honest answer for what remains: a board with
+// no RTC at all, or an RTC that has failed. The position is new, the time is not
+// known, and a stale stamp left in place would claim the user reached this page
+// back whenever the clock last worked -- letting an incoming sync overwrite
+// genuinely fresher reading.
 inline bool writeAtomic(const std::string& cachePath, const uint8_t* data, const size_t len) {
   if (!writeBytesAtomic(cachePath, data, len)) return false;
   uint32_t epoch = 0;

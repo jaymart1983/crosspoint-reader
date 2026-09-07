@@ -135,11 +135,25 @@ ApplyResult applyProgress(const char* booksRoot, const std::string& relativePath
   // Non-empty: isSupportedBookName() above already established the extension.
   const std::string cachePath = cachePathForBook(fullPath);
 
+  // Strictly-newer-wins. The device's own saves are stamped from a clock that
+  // HalClock::begin() starts at the firmware's build epoch on first boot, so a
+  // position this firmware wrote effectively always has a stamp and this is the
+  // ordinary path: two real timestamps, compared.
+  //
+  // The unknown branch below remains for what it was always for -- a
+  // progress.bin written by firmware older than the sidecar, a book whose
+  // sidecar was lost or torn, or a board with no RTC at all. Unknown still
+  // counts as the oldest possible time, so any valid incoming stamp wins.
   uint32_t deviceEpoch = 0;
-  if (ProgressFile::readSavedTime(cachePath, deviceEpoch) && timestamp <= deviceEpoch) {
-    LOG_DBG(TAG, "Skipping %s: incoming %lu is not newer than %lu", relativePath.c_str(),
-            static_cast<unsigned long>(timestamp), static_cast<unsigned long>(deviceEpoch));
-    return ApplyResult::SKIPPED_OLDER;
+  if (ProgressFile::readSavedTime(cachePath, deviceEpoch)) {
+    if (timestamp <= deviceEpoch) {
+      LOG_DBG(TAG, "Skipping %s: incoming %lu is not newer than %lu", relativePath.c_str(),
+              static_cast<unsigned long>(timestamp), static_cast<unsigned long>(deviceEpoch));
+      return ApplyResult::SKIPPED_OLDER;
+    }
+  } else {
+    LOG_DBG(TAG, "%s has no saved timestamp (legacy or clockless save); incoming %lu wins", relativePath.c_str(),
+            static_cast<unsigned long>(timestamp));
   }
 
   // A book that was never opened has no cache directory yet; the reader creates

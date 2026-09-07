@@ -792,8 +792,10 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
 
   if (op == "set_time") {
     // There is no NTP in a build without the network stack, so this is the only
-    // way the device learns the date -- and without a date it cannot timestamp
-    // its own saves, which is what makes progress conflicts resolvable at all.
+    // way the device learns the *real* date: HalClock::begin() has already
+    // started the RTC from the firmware's build epoch, which is a lower bound
+    // that keeps saves stamped but drifts behind wall time until this arrives.
+    // A client's time always wins -- it is the more accurate of the two.
     if (!halClock.isAvailable()) {
       setError("no clock on this device");
       return;
@@ -808,6 +810,7 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
       setError("could not set clock");
       return;
     }
+    LOG_INF("BLE", "Clock set by client to %lu", static_cast<unsigned long>(epoch));
     // No state change: the acknowledgement is `device_time` in the status the
     // client is already subscribed to, which is also how it detects drift.
     statusDirty_ = true;

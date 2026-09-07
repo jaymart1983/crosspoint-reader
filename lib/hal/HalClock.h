@@ -30,7 +30,20 @@ class HalClock {
   // untouched, so "no time" stays "no time" rather than becoming a made-up one.
   void refreshCache() const;
 
+  // Starts a stopped clock, once, at boot. See begin().
+  void seedFromBuildEpoch();
+
  public:
+  // UTC seconds baked in at compile time by scripts/build_epoch.py (the HEAD
+  // commit time, or the build time when git is unavailable). Zero only in a
+  // build that somehow ran without that pre-build script, which disables
+  // seeding rather than inventing a date.
+#ifdef CROSSPOINT_BUILD_EPOCH
+  static constexpr uint32_t BUILD_EPOCH = static_cast<uint32_t>(CROSSPOINT_BUILD_EPOCH);
+#else
+  static constexpr uint32_t BUILD_EPOCH = 0;
+#endif
+
   // A clock this device has never had set reads as 2000-01-01 at best, so
   // anything before 2020 is treated as "not a real wall clock". The upper bound
   // keeps a garbled I2C read from becoming a timestamp no later save can beat.
@@ -42,6 +55,17 @@ class HalClock {
   }
 
   // Call after BoardConfig has selected the active device.
+  //
+  // Also starts the clock if it is not already running. The RTC ships with a
+  // stopped oscillator, so a device that has never been told the time by a BLE
+  // client would read as "unknown" and leave every saved reading position
+  // unstamped -- and an unstamped position loses every sync conflict. A device
+  // cannot be older than the firmware on it, so BUILD_EPOCH is seeded in as a
+  // lower bound: the worst case is a clock that is behind until the app sends
+  // `set_time`, never one that does not know the time at all.
+  //
+  // The seed never moves the clock backwards. An RTC already holding a time at
+  // or after BUILD_EPOCH is left exactly as it is.
   void begin();
 
   // True if an RTC is present on this device
@@ -54,10 +78,14 @@ class HalClock {
   // Current UTC time as seconds since the Unix epoch.
   //
   // Returns false -- meaning "this device does not know what time it is" -- when
-  // there is no RTC, when the RTC reports its oscillator stopped (never set, or
-  // backup power lost), or when the date it holds is not plausible wall-clock
-  // time. Callers must treat that as unknown and must never substitute 0: an
-  // epoch of 0 would compare as a real, very old timestamp.
+  // there is no RTC, when the RTC reports its oscillator stopped, or when the
+  // date it holds is not plausible wall-clock time. Callers must treat that as
+  // unknown and must never substitute 0: an epoch of 0 would compare as a real,
+  // very old timestamp.
+  //
+  // On a board with a working RTC this is now true from the first boot onwards,
+  // because begin() seeds a stopped clock from BUILD_EPOCH. The time may be
+  // behind reality until a client sends one; it is not unknown.
   //
   // The reader stamps saved progress with this, and the BLE sync path compares
   // against it, so it is deliberately stricter than getTime(): the status bar

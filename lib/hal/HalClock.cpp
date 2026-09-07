@@ -76,6 +76,48 @@ HalClock halClock;  // Singleton instance
 void HalClock::begin() {
   _available = _sdkRtc.begin();
   LOG_INF("CLK", _available ? "SDK RTC found" : "RTC not found");
+  seedFromBuildEpoch();
+}
+
+void HalClock::seedFromBuildEpoch() {
+  if (!_available) return;
+  if (!isPlausibleEpoch(BUILD_EPOCH)) {
+    // Only reachable in a build where scripts/build_epoch.py did not run. Say so
+    // rather than making up a date: an unstamped save is bad, a wrong one worse.
+    LOG_ERR("CLK", "No usable build epoch compiled in; clock left as the RTC reports it");
+    return;
+  }
+
+  uint32_t current = 0;
+  if (!getEpoch(current)) {
+    // No plausible time: the oscillator is stopped (never set, or backup power
+    // lost) or the date registers hold nonsense. Start it at the build epoch.
+    if (setEpoch(BUILD_EPOCH)) {
+      LOG_INF("CLK", "RTC had no valid time; seeded from the build epoch %lu (behind until the app sets it)",
+              static_cast<unsigned long>(BUILD_EPOCH));
+    } else {
+      LOG_ERR("CLK", "RTC had no valid time and could not be seeded");
+    }
+    return;
+  }
+
+  if (current < BUILD_EPOCH) {
+    // A running clock that predates the firmware it is running is wrong, so
+    // move it forward to the lower bound. This is the only case where a valid
+    // reading is overwritten, and it is always forwards.
+    if (setEpoch(BUILD_EPOCH)) {
+      LOG_INF("CLK", "RTC read %lu, before the build epoch %lu; advanced to the build epoch",
+              static_cast<unsigned long>(current), static_cast<unsigned long>(BUILD_EPOCH));
+    } else {
+      LOG_ERR("CLK", "RTC read %lu, before the build epoch, but could not be advanced",
+              static_cast<unsigned long>(current));
+    }
+    return;
+  }
+
+  // The common case after the first boot: keep what the RTC holds. Only a
+  // `set_time` from the app changes it from here, correcting the seed's drift.
+  LOG_INF("CLK", "RTC already valid at %lu; left alone", static_cast<unsigned long>(current));
 }
 
 void HalClock::refreshCache() const {

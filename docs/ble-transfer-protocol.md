@@ -107,9 +107,11 @@ Notes on the fields:
   straight back in a `progress` upload and the book reopens exactly where it was. Nothing anywhere converts a
   percentage into a position: that conversion is lossy — recovering a spine index and page from `0.4237` needs the
   book's pagination, which depends on the current font, margins and viewport — so it is not offered at all.
-- `timestamp` is when that position was saved, from the device's own clock. It is omitted for a book whose position
-  predates this firmware, and for one saved while the device did not know the time (see [Device clock](#device-clock)).
-  Absent means unknown, and unknown loses every conflict.
+- `timestamp` is when that position was saved, from the device's own clock. On a board with an RTC it is effectively
+  always present: the clock is started from the firmware's build epoch on first boot, so the device knows a time before
+  any client has set one (see [Device clock](#device-clock)). It is omitted for a book whose position predates this
+  firmware, for one whose sidecar was lost, and on a board with no RTC. Absent means unknown, and unknown loses every
+  conflict.
 - `lastRead` is specified as optional and this firmware still never emits it. It asked a vaguer question ("when was
   this book last read") than the sync path needs; `timestamp` answers the precise one and is what clients should use.
 
@@ -164,21 +166,39 @@ already subscribed to.
 
 - `clock_supported: false` — this board has no RTC. `set_time` is refused with `no clock on this device`, saved
   positions are never timestamped, and this device always loses a conflict. Hide the control.
-- `clock_supported: true` with no `device_time` — there is an RTC but it does not hold a plausible time: never set, or
-  its backup power was lost. Send `set_time`.
-- `device_time` present — compare it against your own clock and re-send `set_time` if it has drifted.
+- `clock_supported: true` with no `device_time` — an RTC that is present but unreadable, or one whose date registers
+  hold nonsense. Rare (see seeding, below). Send `set_time`.
+- `device_time` present — the normal case. Compare it against your own clock and re-send `set_time` if it has drifted.
 
 `device_time` is never `0`. An unknown time is an absent field, because `0` would read as a real instant in 1970.
 
-**Set the clock before the first sync.** Until the device has a working clock its own saves carry no timestamp, and
-an unstamped save loses every conflict — so a client that never calls `set_time` will happily overwrite reading the
-user did on the device. The device cannot defend progress it could not date. A client should send `set_time` as soon
-as `status` shows `clock_supported: true` with no `device_time`, and before uploading a `progress` batch.
+### The clock is running before you set it
+
+The RTC ships with a stopped oscillator, so on a brand-new device it would report no time at all until a client sent
+`set_time` — and every position the user read in the meantime would be saved unstamped, losing every later conflict.
+That limitation is gone: **the firmware seeds the RTC from its own build epoch at boot.**
+
+A device cannot be older than the firmware running on it, so the build epoch is a sound lower bound for wall time. At
+every boot the firmware compares the two:
+
+| RTC holds | What happens |
+| --- | --- |
+| No plausible time (stopped oscillator, garbled registers) | Seeded to the build epoch. |
+| A time *before* the build epoch | Advanced to the build epoch — a clock predating its own firmware is wrong. |
+| A time at or after the build epoch | Left alone. |
+
+**The clock is never moved backwards**, and a `set_time` from a client always wins: it is the more accurate source and
+it is what corrects the seed. The consequence for clients is that `device_time` may be *behind* real time — as far
+behind as the firmware's age — until the app corrects it. It is never "unknown".
+
+**Still send `set_time` early.** A seeded clock keeps the device's saves stamped and comparable, but the stamps are
+only as good as the seed: two devices on different firmware builds order against each other by build date, not by when
+the user actually read. Send `set_time` as soon as `status` arrives and before uploading a `progress` batch.
 
 The clock is a hardware RTC with full date registers (PCF8563 on this board, DS3231 and RX8130 on others), so this is
-a genuine wall clock, not a since-boot counter — the firmware does not fall back to one, and never fabricates a date.
-The RTC is read at most every 10 seconds and the reading is carried forward with the millisecond counter in between,
-so two saves inside one poll window still order correctly.
+a genuine wall clock, not a since-boot counter — the firmware does not fall back to one, and the build epoch is the
+only date it ever supplies itself. The RTC is read at most every 10 seconds and the reading is carried forward with
+the millisecond counter in between, so two saves inside one poll window still order correctly.
 
 ## `progress`
 
@@ -210,8 +230,11 @@ half-apply.
 An entry is applied **only if `timestamp` is strictly newer than the timestamp stored beside the device's own saved
 position for that book.** Otherwise it is skipped and reported `skipped_older`.
 
+- Both sides normally have a real timestamp: the device stamps its own saves from a clock that is running from first
+  boot (see [Device clock](#device-clock)), so "two dates, compared" is the ordinary case.
 - A device timestamp that is **unknown counts as the oldest possible**, so any valid incoming timestamp wins. Unknown
-  means: the position was saved by firmware older than this feature, or saved while the device did not know the time.
+  now means only: the position was saved by firmware older than this feature, its sidecar was lost or torn, or the
+  board has no RTC.
 - **Equal timestamps do not apply.** Echoing back what `library` just reported is a no-op, not a rewrite.
 - An entry whose `timestamp` is outside the range `set_time` accepts is `invalid`, not applied. There is no path that
   writes a position without a usable timestamp.
@@ -282,13 +305,16 @@ little-endian), not inside `progress.bin` itself. Two reasons:
 
 Backwards compatibility follows from that: **every position saved before this existed has no sidecar, and reads as
 "unknown"** — which the conflict rule treats as older than any real timestamp, never as epoch 0. A sidecar that is
-short, has the wrong magic, or holds an implausible epoch also reads as unknown.
+short, has the wrong magic, or holds an implausible epoch also reads as unknown. Going forward, though, unknown is the
+exception rather than the rule: with the clock seeded at boot, every save this firmware makes on a board with an RTC
+writes a sidecar.
 
 `progress.bin` keeps its crash-safe temp-and-rename write (issue #2275). The sidecar is written in place afterwards:
 it is nine bytes in a single sector, and a torn write there fails the magic check and degrades to "unknown" — a
 skipped sync, not a lost book. A save made while the device has no working clock **deletes** any existing sidecar
 rather than leaving a stale one, because a stale stamp would claim a position the user reached just now was reached
-much earlier, and let an incoming sync overwrite genuinely fresher reading.
+much earlier, and let an incoming sync overwrite genuinely fresher reading. That path is now reachable only on a board
+with no working RTC.
 
 ## Explicit Non-goals
 
