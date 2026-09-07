@@ -26,13 +26,14 @@ class BleTransferActivity final : public Activity {
     FIRMWARE_CONFIRM,
     UPDATING,
     RESTARTING,
+    PREPARING,
     SENDING,
     SENT,
     SAVE_HOST_PROMPT,
     FORGET_HOST_PROMPT,
     ERROR
   };
-  enum class TransferKind { NONE, BOOK, BMP, FIRMWARE, CRASH_REPORT };
+  enum class TransferKind { NONE, BOOK, BMP, FIRMWARE, CRASH_REPORT, LIBRARY };
 
   explicit BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
   ~BleTransferActivity() override;
@@ -44,7 +45,7 @@ class BleTransferActivity final : public Activity {
   bool preventAutoSleep() override { return true; }
   bool skipLoopDelay() override {
     return state_ == State::VERIFYING || state_ == State::UPDATING || state_ == State::FIRMWARE_CONFIRM ||
-           state_ == State::SENDING;
+           state_ == State::PREPARING || state_ == State::SENDING;
   }
 
   void enqueueBleConnected();
@@ -120,7 +121,9 @@ class BleTransferActivity final : public Activity {
   void onControlWrite(const std::string& value);
   void onDataWrite(const std::string& value);
   void processCommit();
+  void startFileDownload(const char* path, const char* name, TransferKind kind, size_t offset, size_t chunkSize);
   void startCrashReportDownload(size_t offset, size_t chunkSize);
+  void startLibraryDownload(size_t offset, size_t chunkSize);
   void pumpDownload();
   void resetTransfer(bool removePart);
   void setState(State state);

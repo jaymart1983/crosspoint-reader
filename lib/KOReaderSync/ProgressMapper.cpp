@@ -767,14 +767,23 @@ bool streamSpine(const std::shared_ptr<Epub>& epub, int spineIndex, ParagraphStr
   const auto href = epub->getSpineItem(spineIndex).href;
   return !href.empty() && epub->readItemContentsToStream(href, s, 1024);
 }
+// Fraction of the current spine item that has been read, from the page counters.
+float intraSpineProgress(const CrossPointPosition& pos) {
+  return (pos.totalPages > 1) ? static_cast<float>(pos.pageNumber) / static_cast<float>(pos.totalPages - 1) : 0.0f;
+}
+
 }  // namespace
+
+float ProgressMapper::toPercentage(const std::shared_ptr<Epub>& epub, const CrossPointPosition& pos) {
+  if (!epub) return 0.0f;
+  return epub->calculateProgress(pos.spineIndex, intraSpineProgress(pos));
+}
 
 SavedProgressPosition ProgressMapper::toSavedProgress(const std::shared_ptr<Epub>& epub,
                                                       const CrossPointPosition& pos) {
   SavedProgressPosition result;
-  float intra =
-      (pos.totalPages > 1) ? static_cast<float>(pos.pageNumber) / static_cast<float>(pos.totalPages - 1) : 0.0f;
-  result.percentage = epub->calculateProgress(pos.spineIndex, intra);
+  const float intra = intraSpineProgress(pos);
+  result.percentage = toPercentage(epub, pos);
   if (pos.hasParagraphIndex && pos.paragraphIndex > 0) {
     result.xpath = ChapterXPathResolver::findXPathForParagraph(epub, pos.spineIndex, pos.paragraphIndex);
   }

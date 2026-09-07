@@ -27,6 +27,7 @@
 #include "fontIds.h"
 #include "network/FirmwareFlasher.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookLibraryIndex.h"
 #include "util/QrUtils.h"
 
 namespace {
@@ -45,6 +46,11 @@ constexpr const char* BLE_OTA_PART_PATH = "/.crosspoint/ble-ota/firmware.bin.par
 constexpr const char* BLE_OTA_FINAL_PATH = "/.crosspoint/ble-ota/firmware.bin";
 constexpr const char* CRASH_REPORT_PATH = "/crash_report.txt";
 constexpr const char* CRASH_REPORT_NAME = "crash_report.txt";
+// The library listing is staged on SD rather than held in RAM, then served
+// through the same frame/ack path as any other download -- which is also what
+// gives it a known size and a resumable offset.
+constexpr const char* LIBRARY_INDEX_PATH = "/.crosspoint/ble-library.json";
+constexpr const char* LIBRARY_INDEX_NAME = "library.json";
 constexpr size_t MIN_BLE_FIRMWARE_BYTES = 64UL * 1024UL;
 constexpr size_t MAX_BLE_BOOK_BYTES = 32UL * 1024UL * 1024UL;
 constexpr size_t MAX_BLE_BMP_BYTES = 8UL * 1024UL * 1024UL;
@@ -169,6 +175,8 @@ std::string transferKindName(const BleTransferActivity::TransferKind kind) {
       return "firmware";
     case BleTransferActivity::TransferKind::CRASH_REPORT:
       return "crash_report";
+    case BleTransferActivity::TransferKind::LIBRARY:
+      return "library";
     case BleTransferActivity::TransferKind::NONE:
       return "";
   }
@@ -211,6 +219,8 @@ std::string stateName(BleTransferActivity::State state) {
       return "updating";
     case BleTransferActivity::State::RESTARTING:
       return "restarting";
+    case BleTransferActivity::State::PREPARING:
+      return "preparing";
     case BleTransferActivity::State::SENDING:
       return "sending";
     case BleTransferActivity::State::SENT:
@@ -406,6 +416,8 @@ void BleTransferActivity::onEnter() {
 void BleTransferActivity::onExit() {
   Activity::onExit();
   resetTransfer(true);
+  // The staged library listing is a scratch file for one session only.
+  if (Storage.exists(LIBRARY_INDEX_PATH)) Storage.remove(LIBRARY_INDEX_PATH);
   if (ble_) {
     ble_->end();
     ble_.reset();
@@ -787,6 +799,10 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
       startCrashReportDownload(static_cast<size_t>(offsetValue), static_cast<size_t>(chunkSizeValue));
       return;
     }
+    if (kind == "library") {
+      startLibraryDownload(static_cast<size_t>(offsetValue), static_cast<size_t>(chunkSizeValue));
+      return;
+    }
     setError("unsupported transfer kind");
     return;
   }
@@ -936,18 +952,19 @@ void BleTransferActivity::processCommit() {
   requestUpdateAndWait();
 }
 
-void BleTransferActivity::startCrashReportDownload(const size_t offset, const size_t chunkSize) {
-  if (!Storage.exists(CRASH_REPORT_PATH)) {
+void BleTransferActivity::startFileDownload(const char* path, const char* name, const TransferKind kind,
+                                            const size_t offset, const size_t chunkSize) {
+  if (!Storage.exists(path)) {
     setError("not_found");
     return;
   }
-  if (!Storage.openFileForRead("BLE", CRASH_REPORT_PATH, downloadFile_)) {
-    setError("could not open crash report");
+  if (!Storage.openFileForRead("BLE", path, downloadFile_)) {
+    setError("could not open download");
     return;
   }
 
-  fileName_ = CRASH_REPORT_NAME;
-  transferKind_ = TransferKind::CRASH_REPORT;
+  fileName_ = name;
+  transferKind_ = kind;
   expectedSize_ = downloadFile_.fileSize();
   if (offset > expectedSize_) {
     downloadFile_.close();
@@ -961,7 +978,7 @@ void BleTransferActivity::startCrashReportDownload(const size_t offset, const si
   }
   if (!downloadFile_.seek(offset)) {
     downloadFile_.close();
-    setError("could not seek crash report");
+    setError("could not seek download");
     return;
   }
   sentBytes_ = offset;
@@ -972,6 +989,34 @@ void BleTransferActivity::startCrashReportDownload(const size_t offset, const si
   lastProgressStatusBytes_ = sentBytes_;
   downloadOpen_ = true;
   setState(State::SENDING);
+}
+
+void BleTransferActivity::startCrashReportDownload(const size_t offset, const size_t chunkSize) {
+  startFileDownload(CRASH_REPORT_PATH, CRASH_REPORT_NAME, TransferKind::CRASH_REPORT, offset, chunkSize);
+}
+
+void BleTransferActivity::startLibraryDownload(const size_t offset, const size_t chunkSize) {
+  // Offset 0 means a fresh listing, so rebuild it: a client must never resume
+  // onto a document that changed underneath it. A non-zero offset can only refer
+  // to the file staged by that same start_get.
+  if (offset == 0) {
+    // Walking the shelf is seconds of SD work -- one metadata cache open per
+    // book -- so say so on screen and over BLE before blocking on it.
+    setState(State::PREPARING);
+    publishStatus();
+    requestUpdateAndWait();
+
+    BookLibraryIndex::Stats stats;
+    if (!BookLibraryIndex::build(BOOKS_ROOT, LIBRARY_INDEX_PATH, &stats)) {
+      setError("could not build library index");
+      return;
+    }
+    LOG_DBG("BLE", "Library index staged: %u books", static_cast<unsigned>(stats.books));
+  } else if (!Storage.exists(LIBRARY_INDEX_PATH)) {
+    setError("not_found");
+    return;
+  }
+  startFileDownload(LIBRARY_INDEX_PATH, LIBRARY_INDEX_NAME, TransferKind::LIBRARY, offset, chunkSize);
 }
 
 void BleTransferActivity::pumpDownload() {
@@ -1230,6 +1275,7 @@ std::string BleTransferActivity::buildStatusJson() const {
   uploadKinds.add("firmware");
   JsonArray downloadKinds = doc["download_kinds"].to<JsonArray>();
   downloadKinds.add("crash_report");
+  downloadKinds.add("library");
   doc["device_id"] = deviceId_.c_str();
   doc["device_nonce"] = deviceNonce_.c_str();
   doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
@@ -1323,8 +1369,12 @@ void BleTransferActivity::render(RenderLock&&) {
       primary = tr(STR_BLE_TRANSFER_RESTARTING);
       secondary = tr(STR_BLE_TRANSFER_FIRMWARE_UPDATED);
       break;
+    case State::PREPARING:
+      primary = tr(STR_BLE_TRANSFER_PREPARING_LIBRARY);
+      break;
     case State::SENDING: {
-      primary = tr(STR_BLE_TRANSFER_SENDING);
+      primary =
+          transferKind_ == TransferKind::LIBRARY ? tr(STR_BLE_TRANSFER_SENDING_LIBRARY) : tr(STR_BLE_TRANSFER_SENDING);
       char buffer[48];
       snprintf(buffer, sizeof(buffer), "%u / %u bytes", static_cast<unsigned>(sentBytes_),
                static_cast<unsigned>(expectedSize_));
@@ -1332,7 +1382,7 @@ void BleTransferActivity::render(RenderLock&&) {
       break;
     }
     case State::SENT:
-      primary = tr(STR_BLE_TRANSFER_SENT);
+      primary = transferKind_ == TransferKind::LIBRARY ? tr(STR_BLE_TRANSFER_LIBRARY_SENT) : tr(STR_BLE_TRANSFER_SENT);
       secondary = fileName_;
       break;
     case State::ERROR:

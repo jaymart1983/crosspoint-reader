@@ -55,6 +55,27 @@ class ProgressMapper {
   static SavedProgressPosition toSavedProgress(const std::shared_ptr<Epub>& epub, const CrossPointPosition& pos);
 
   /**
+   * Percentage-only projection of a CrossPoint position (0.0 - 1.0).
+   *
+   * This is exactly the value toSavedProgress() reports as
+   * SavedProgressPosition::percentage -- that function delegates here -- but it
+   * skips resolving the KOReader XPath, which streams and parses the whole
+   * spine item. Callers that only need "how far through is this book" (the BLE
+   * library listing, for instance, which answers that for every book on the
+   * card) must use this entry point; resolving an XPath per book would
+   * decompress a chapter per book.
+   *
+   * Needs only the book metadata cache, so an Epub loaded with
+   * buildIfMissing = false is enough. Returns 0 when the cache is missing
+   * (getBookSize() == 0), i.e. a book that was never opened.
+   *
+   * @param epub The EPUB book
+   * @param pos CrossPoint position
+   * @return Progress through the whole book, 0.0 - 1.0
+   */
+  static float toPercentage(const std::shared_ptr<Epub>& epub, const CrossPointPosition& pos);
+
+  /**
    * Convert SavedProgress position to CrossPoint format.
    *
    * Note: The returned pageNumber may be approximate since different
