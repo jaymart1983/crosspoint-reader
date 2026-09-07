@@ -444,9 +444,11 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   // condition, and the header should be quiet in it.
   showBle = BLE_LINK.isAuthenticated();
 #endif
-  // "USB" only while a cable is attached; absent otherwise, so the header stays
-  // quiet on battery.
-  const bool showUsb = gpio.isUsbConnected();
+  // "USB" means the host has the card -- not that a cable carries power.
+  // HalGPIO::isUsbConnected() is a VBUS pin: it reads HIGH for a wall charger
+  // and for a charge-only cable, neither of which is a USB drive, so labelling
+  // that "USB" promised something the device was not doing.
+  const bool showUsb = Storage.usbDriveHandoffPending();
 
   const int16_t clockWidth =
       showClock ? ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, clockText, tokens.smallText).width : 0;

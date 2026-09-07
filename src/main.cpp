@@ -946,6 +946,7 @@ void loop() {
     if (hostFinished || !gpio.isUsbConnected()) {
       LOG_INF("USB", "host released the card; rebooting to the serial personality");
       Storage.endUsbDrive();
+      Storage.setUsbDriveHandoffPending(false);
       // Deliberately not restartToHomeAfterStorageHandoff(): that draws a popup,
       // and the filesystem the fonts live on has only just come back. A reboot
       // shows the boot screen anyway.
@@ -961,14 +962,19 @@ void loop() {
 
   if (sawUsbUnplugged && gpio.wasUsbStateChanged() && gpio.isUsbConnected()) {
     LOG_INF("USB", "cable plugged into an awake device; mounting the card");
-    // Paint the header (which now carries "USB") while the fonts are still
-    // readable, and wait for that paint to finish. Every render after this point
-    // would be a read against a detached filesystem.
+    // Declare the handoff BEFORE the repaint: this is what the header's "USB"
+    // reads, and this is the only paint that will happen until the host lets go.
+    Storage.setUsbDriveHandoffPending(true);
+    // Paint the header while the fonts are still readable, and wait for that
+    // paint to finish. Every render after this point would be a read against a
+    // detached filesystem.
     activityManager.requestUpdateAndWait();
     if (Storage.beginUsbDrive()) {
       usbDriveActive = true;
     } else {
       LOG_ERR("USB", "could not hand the card to the host; carrying on normally");
+      Storage.setUsbDriveHandoffPending(false);
+      activityManager.requestUpdate();
     }
     return;
   }

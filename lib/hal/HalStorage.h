@@ -31,6 +31,17 @@ class HalStorage {
   void prepareForDeepSleep();
   // USB Drive exclusively owns the SD card while active. Callers must stop
   // all filesystem work before beginUsbDrive(), then reboot after endUsbDrive().
+  // True from the moment the device commits to handing the card over until it
+  // has it back. Distinct from HalGPIO::isUsbConnected(), which is a VBUS pin --
+  // that says a cable carries power, not that the host has the card, and cannot
+  // tell a wall charger from a data cable.
+  //
+  // It is set BEFORE beginUsbDrive() rather than derived from usbDriveState()
+  // because nothing may be drawn once the filesystem is detached (fonts live on
+  // it), so the one repaint that shows the indicator has to happen while the
+  // handoff is still only an intention.
+  bool usbDriveHandoffPending() const { return usbDriveHandoffPending_; }
+  void setUsbDriveHandoffPending(bool pending) { usbDriveHandoffPending_ = pending; }
   bool beginUsbDrive();
   bool disconnectUsbDriveHost();
   void endUsbDrive();
@@ -70,6 +81,7 @@ class HalStorage {
   class StorageLock;  // private class, used internally
 
  private:
+  bool usbDriveHandoffPending_ = false;
   static HalStorage instance;
 
   bool initialized = false;

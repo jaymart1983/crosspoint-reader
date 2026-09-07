@@ -30,7 +30,12 @@ constexpr const char* DETAIL_THUMB_DIR = "/.crosspoint/store/detail";
 // the upload. 20 s is generous for that and still short enough that a user
 // staring at "Asking your phone" knows something is wrong before they start
 // pressing buttons.
-constexpr unsigned long REQUEST_TIMEOUT_MS = 20000;
+// Like the fetch budget, this has to cover the phone's own network work, not
+// just the BLE leg: a catalogue page carries six dithered thumbnails and a detail
+// carries one, and the app downloads every one of those covers from Calibre-Web
+// before it can answer. 20s was inside that over a remote link, so the reader
+// declared the app silent while it was still fetching covers.
+constexpr unsigned long REQUEST_TIMEOUT_MS = 60000;
 // A book can need a format conversion on the Calibre side before the app can
 // even begin sending, which is the one step that is genuinely slow. The clock
 // stops the moment the upload starts -- from there the ordinary transfer
