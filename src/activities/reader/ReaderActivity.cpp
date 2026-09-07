@@ -72,7 +72,7 @@ void ReaderActivity::onEnter() {
 void ReaderActivity::onExit() {
   Activity::onExit();
 
-  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  ReaderUtils::applyUiOrientation(renderer);
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
 

@@ -13,6 +13,7 @@
 #include "CrossPointSettings.h"
 #include "DeviceSleep.h"
 #include "MappedInputManager.h"
+#include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/icons/customListIcons.h"
@@ -37,7 +38,20 @@ constexpr int16_t kGrabberHeight = 5;     // fui::SheetProps default, mirrored h
 constexpr int16_t kSliderRowHeight = 56;  // the pill itself (finger-sized)
 constexpr int16_t kTileHeight = 84;
 constexpr int16_t kTileGap = 16;
-constexpr int kTileCols = 2;
+// The two band heights above are the ROOMY sizes, used whenever the frame has
+// space for them; computeLayout() trims towards these floors when it does not.
+// Both floors are still comfortably finger-sized (the SDK's touch target is
+// 44px), so a trimmed sheet stays tappable rather than merely visible.
+constexpr int16_t kMinSliderRowHeight = 44;
+constexpr int16_t kMinTileHeight = 56;
+constexpr int16_t kLayoutTrimStep = 4;
+// Air left below the sheet, so it reads as a card hanging into the screen
+// rather than a second full screen with a line across the bottom.
+constexpr int16_t kMinBottomAir = 24;
+// Above this logical width a two-column grid runs the sheet off the bottom of a
+// 480-tall frame while leaving half the sheet empty; four columns fit the same
+// tiles in half the rows. The X4 Pro's native landscape frame is 800 wide.
+constexpr int kWideFrameWidth = 700;
 // One percent per press, on the -/+ buttons and on the physical Left/Right keys
 // alike (both repeat while held), so a level can be set exactly.
 constexpr int BRIGHTNESS_STEP = 1;
@@ -59,9 +73,6 @@ FrontlightPanelActivity::FrontlightPanelActivity(GfxRenderer& renderer, MappedIn
 
 void FrontlightPanelActivity::onEnter() {
   Activity::onEnter();
-
-  savedOrientation = renderer.getOrientation();
-  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
   // A stored 0% predates the 1% floor (or came from the web settings): show it
   // as the floor rather than a level the slider can no longer produce. onExit
@@ -88,22 +99,51 @@ void FrontlightPanelActivity::onEnter() {
   requestUpdate();
 }
 
-// The tiles this board shows, in grid order. Two columns, so consecutive pairs
-// share a row: display, then the two hardware switches, then the three ways off
-// this screen.
+// The tiles this board shows, in grid order: display first, then the touch
+// switch, then the three ways off this screen. There is no Frontlight tile —
+// the lamp button on the brightness row is the light's on/off switch, sitting
+// right next to the level it belongs to, and a tile carrying the same toggle a
+// few rows below it was simply a second control for one thing.
 void FrontlightPanelActivity::buildTileOrder() {
   tileCount = 0;
   const auto add = [this](const TileId id) { tileIds[tileCount++] = id; };
   add(TILE_NIGHT);
   add(TILE_REFRESH);
   add(TILE_ORIENTATION);
-  // A board with no light has nothing for this tile to toggle; the slider rows
-  // are hidden on it for the same reason.
-  if (Frontlight.present()) add(TILE_LIGHT);
   add(TILE_TOUCH);
   add(TILE_SLEEP);
   add(TILE_SETTINGS);
   add(TILE_HOME);
+}
+
+// The sheet lays out in whatever frame it opened over, so its bands are sized
+// here rather than baked in: a 480x800 portrait frame has height to spare and
+// room for only two tile columns, while the X4 Pro's native 800x480 landscape
+// is the other way round — wide enough for four columns and 320px shorter, so
+// the roomy band heights no longer fit. Anything the sheet does not fit is not
+// merely cramped: Screen::sheet clamps its content area, so a row past the
+// bottom is not drawn at all.
+void FrontlightPanelActivity::computeLayout() {
+  tileCols = renderer.getScreenWidth() >= kWideFrameWidth ? 4 : 2;
+  tileHeight = kTileHeight;
+  sliderRowHeight = kSliderRowHeight;
+
+  // Trim the tiles first and the slider pills only once the tiles are at their
+  // floor: the pills are dragged, the tiles are only tapped.
+  const int maxBottom = renderer.getScreenHeight() - kMinBottomAir;
+  while (computePanelBottom() > maxBottom) {
+    if (tileHeight > kMinTileHeight) {
+      tileHeight = static_cast<int16_t>(tileHeight - kLayoutTrimStep);
+      continue;
+    }
+    if (sliderRowHeight > kMinSliderRowHeight) {
+      sliderRowHeight = static_cast<int16_t>(sliderRowHeight - kLayoutTrimStep);
+      continue;
+    }
+    // Both bands are at their floor. The sheet is as short as it can be while
+    // staying usable; it simply reaches the bottom of this frame.
+    break;
+  }
 }
 
 void FrontlightPanelActivity::applyTileStyles(const uint8_t radius) {
@@ -163,7 +203,6 @@ void FrontlightPanelActivity::persistLightSettings() {
 
 void FrontlightPanelActivity::onExit() {
   persistLightSettings();
-  renderer.setOrientation(savedOrientation);
   Activity::onExit();
 }
 
@@ -219,11 +258,13 @@ void FrontlightPanelActivity::runTile(const int id) {
       renderer.promoteNextRefresh(HalDisplay::FULL_REFRESH);
       close();
       break;
-    case TILE_ORIENTATION:  // Cycle the reading orientation
-      SETTINGS.orientation = static_cast<uint8_t>((SETTINGS.orientation + 1) % 4);
+    case TILE_ORIENTATION:
+      // Steps through the orientations this build offers, which on a board with
+      // no portrait mode is the two landscape ones — i.e. a 180-degree flip.
+      SETTINGS.orientation = CrossPointSettings::cycleOrientation(SETTINGS.orientation, 1);
       SETTINGS.saveToFile();
-      // Only the setting changes: turning the renderer cropped the portrait-only
-      // screens the panel opens over. The reader reflows on its next loop().
+      // Only the setting changes; the live frame is left alone. The reader
+      // reflows to it on its next loop().
       requestUpdate();
       break;
     // The two navigation tiles replace the whole stack rather than popping:
@@ -233,20 +274,15 @@ void FrontlightPanelActivity::runTile(const int id) {
     // brightness/warmth still persist on the way out.
     case TILE_SETTINGS:
     case TILE_HOME:
-      // Both are portrait screens, so the frame must NOT be put back the way the
-      // panel found it: a power tap can open this panel over a reader that has
-      // the renderer turned, and restoring that on the way out would draw
-      // Settings or Home rotated.
-      savedOrientation = GfxRenderer::Orientation::Portrait;
+      // Both are UI-frame screens and a power tap can open this panel over a
+      // reader that has the renderer turned, so put the UI frame back before
+      // leaving — otherwise Settings or Home draws in the reader's frame.
+      ReaderUtils::applyUiOrientation(renderer);
       if (id == TILE_SETTINGS) {
         activityManager.goToSettings();
       } else {
         activityManager.goHome();
       }
-      break;
-    case TILE_LIGHT:  // Frontlight on/off — the same switch as the lamp button
-                      // on the brightness row, reachable from a button here.
-      toggleLight();
       break;
     case TILE_SLEEP:
       // Close first, then ask main.cpp to sleep at the top of its next loop:
@@ -356,9 +392,9 @@ void FrontlightPanelActivity::loop() {
   // With the glass off the panel is driven entirely from keys: the navigation
   // pair moves the tile cursor and Confirm activates it. Brightness stepping
   // gives way to that on purpose — the tile grid is the part that has to be
-  // reachable (it holds the switch that turns touch back on), and the
-  // Frontlight tile still covers on/off, which is the half of the light that
-  // matters when you cannot see a slider to drag.
+  // reachable, since it holds the switch that turns touch back on. The light's
+  // on/off is not stranded by that: a power-button DOUBLE TAP toggles it from
+  // anywhere, this panel included.
   if (buttonNavActive()) {
     // Confirm covers the X4 Pro's Right side-key hold, which MappedInputManager
     // folds into Button::Confirm outside a book. That is hardwired rather than
@@ -400,16 +436,16 @@ int FrontlightPanelActivity::computePanelBottom() const {
   if (Frontlight.present()) {
     // Screen::sliderRow reserves caption + spaceMd + control band, then a
     // spaceMd gap; addSliderRow() adds one more spaceMd of air after each row.
-    y += lineHeight + tokens.spaceMd + kSliderRowHeight + 2 * tokens.spaceMd;  // brightness
+    y += lineHeight + tokens.spaceMd + sliderRowHeight + 2 * tokens.spaceMd;  // brightness
     if (Frontlight.hasColorTemperature()) {
-      y += lineHeight + tokens.spaceMd + kSliderRowHeight + 2 * tokens.spaceMd;  // warmth
+      y += lineHeight + tokens.spaceMd + sliderRowHeight + 2 * tokens.spaceMd;  // warmth
     }
     y += tokens.spaceSm;
   }
   // Tiles are for touch boards: they are the finger-sized quick settings, and on
   // a buttons-only board the sheet is exactly the frontlight controls.
   const int tiles = mappedInput.hasTouch() ? tileCount : 0;
-  y += fui::tileGridHeight(static_cast<uint16_t>(tiles), kTileCols, kTileHeight, kTileGap);
+  y += fui::tileGridHeight(static_cast<uint16_t>(tiles), tileCols, tileHeight, kTileGap);
   // The sheet's grabber band: content margin + grabber + air to the edge.
   // buildPanelScreen() feeds the same theme spacings into SheetProps.
   y += tokens.spaceLg + kGrabberHeight + tokens.spaceLg + tokens.spaceMd;
@@ -449,7 +485,7 @@ void FrontlightPanelActivity::addSliderRow(UiScreen& screen, const char* label, 
     rowProps.toggleAction = fui::NO_ACTION;
     rowProps.toggleIcon = fui::BitmapRef{};
   }
-  screen.sliderRow(rowProps, kSliderRowHeight);
+  screen.sliderRow(rowProps, sliderRowHeight);
   // The wrapper's own trailing gap is one spaceMd; double it so the rows
   // breathe — a control band this tall reads cramped at the list cadence.
   screen.spacer(screen.theme().spaceMd);
@@ -530,10 +566,6 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
         case TILE_ORIENTATION:
           label = orientLabel;
           break;
-        case TILE_LIGHT:
-          label = tr(STR_FRONTLIGHT);
-          checked = lightOn;
-          break;
         case TILE_TOUCH:
           label = touchLabel;
           // Filled when touch is OFF — the non-default, attention-worthy state.
@@ -570,13 +602,18 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
     gridProps.items = gridItems;
     gridProps.count = static_cast<uint16_t>(tileCount);
     gridProps.action = ACTION_TILE;
-    gridProps.tileHeight = kTileHeight;
+    gridProps.columns = tileCols;
+    gridProps.tileHeight = tileHeight;
     gridProps.gap = kTileGap;
     screen.tileGrid(gridProps);
   }
 }
 
 void FrontlightPanelActivity::render(RenderLock&&) {
+  // The frame can change under the panel between renders (the orientation tile
+  // does not turn it, but a reader underneath re-applies its own on the way
+  // back), so the layout is re-measured every render rather than only at enter.
+  computeLayout();
   panelBottom = computePanelBottom();
 
   // fui::sheet draws the card body, its bottom rule, and the grabber during

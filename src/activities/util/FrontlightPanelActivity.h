@@ -9,11 +9,17 @@
 // tap (iOS Control Center style): a grabber, the frontlight
 // brightness/warmth sliders (on boards with a light), and a grid of
 // quick-setting tiles — night mode, ghost-cleanup refresh, reading orientation,
-// frontlight, touchscreen on/off, sleep, settings and home. The frontlight
-// controls are always there: they are what the panel is for. Pure 1-bit: no
-// dithered fills, a tile whose setting is on reads as a filled tile. The
-// grabber sits along the panel's bottom edge, the edge the sheet is dragged
-// from.
+// touchscreen on/off, sleep, settings and home. The frontlight controls are
+// always there: they are what the panel is for, and the lamp button that sits
+// after the brightness row's + is the on/off switch — there is deliberately no
+// separate Frontlight TILE duplicating it. Pure 1-bit: no dithered fills, a
+// tile whose setting is on reads as a filled tile. The grabber sits along the
+// panel's bottom edge, the edge the sheet is dragged from.
+//
+// The sheet lays out in whatever frame it opens over and never turns the
+// renderer itself (an earlier pass forced portrait for as long as it was up).
+// That means it has to fit both the 480x800 portrait frame and the X4 Pro's
+// 800x480 landscape one, which is what computeLayout() below is for.
 //
 // This panel is also the recovery screen for a device whose touchscreen has
 // been switched off — the Touch tile is the only way back on — so it has to be
@@ -51,25 +57,22 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
     TILE_SETTINGS = 4,
     TILE_HOME = 5,
     TILE_SLEEP = 6,
-    TILE_LIGHT = 7,
   };
-  static constexpr int kMaxTiles = 8;
+  static constexpr int kMaxTiles = 7;
   // Grid order, filled by buildTileOrder() in onEnter(): the visible subset of
-  // the ids above, in the order they are laid out. Two columns, so this reads
-  // down the page in pairs.
+  // the ids above, in the order they are laid out.
   int16_t tileIds[kMaxTiles] = {};
   int tileCount = 0;
   // Index into tileIds of the button cursor, or -1 while nothing is focused.
   // Only meaningful (and only drawn) while the touchscreen is switched off.
   int focusedTile = -1;
-  // The sheet is a portrait card sized against the whole screen height, and it
-  // can now be opened from the reader (a power tap works everywhere),
-  // which may have the renderer turned. So the panel forces portrait for as long
-  // as it is up and puts the frame back exactly as it found it on the way out --
-  // a rotated reader underneath re-applies its own orientation on its next
-  // loop() only when SETTINGS changed, so leaving the frame turned would strand
-  // it with a layout built for the other frame size.
-  GfxRenderer::Orientation savedOrientation = GfxRenderer::Orientation::Portrait;
+
+  // --- Live layout, sized against the frame the sheet opened in ----------------
+  // Filled by computeLayout(); computePanelBottom() and buildPanelScreen() both
+  // read these rather than the constants they start from.
+  uint8_t tileCols = 2;
+  int16_t tileHeight = 0;
+  int16_t sliderRowHeight = 0;
 
   // fui::SliderRowProps and fui::TileGridProps embed a 324-byte fui::StyleSet,
   // so the props the render path fills in live here instead of on the stack
@@ -96,6 +99,11 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   void addSliderRow(UiScreen& screen, const char* label, uint8_t value, freeink::ui::ActionId sliderAction,
                     freeink::ui::ActionId stepAction, bool showToggle);
   int computePanelBottom() const;
+  // Picks the tile column count and the two finger-sized band heights so the
+  // whole sheet fits the current frame. A wide, short frame (the X4 Pro's
+  // native 800x480) needs more columns and shorter bands than a portrait one,
+  // and a sheet taller than the screen silently loses its bottom row of tiles.
+  void computeLayout();
   // Fills tileIds/tileCount with the tiles this board actually shows.
   void buildTileOrder();
   // Fills gridProps.styles in place. Written field by field rather than through
@@ -105,6 +113,8 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   void applyTileStyles(uint8_t radius);
   // True while the panel has to be driven from buttons: the glass is off, so
   // the navigation keys move the tile cursor instead of stepping brightness.
+  // The light is still reachable then — a power-button DOUBLE TAP toggles it
+  // from anywhere, which is what replaced the Frontlight tile.
   bool buttonNavActive() const;
   void moveFocus(int delta);
   void adjustBrightness(int delta);

@@ -17,7 +17,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
                                                const bool hasFootnotes, const bool hasBookmarks)
     : UiListActivity("EpubReaderMenu", renderer, mappedInput),
       title(title),
-      pendingOrientation(currentOrientation),
+      pendingOrientation(CrossPointSettings::normalizeOrientation(currentOrientation)),
       currentPage(currentPage),
       totalPages(totalPages),
       bookProgressPercent(bookProgressPercent) {
@@ -88,9 +88,16 @@ void EpubReaderMenuActivity::activateIndex(const int index) {
 
   const auto selectedAction = menuItems[index].action;
   if (selectedAction == MenuAction::ROTATE_SCREEN) {
-    optionPopup.show(StrId::STR_ORIENTATION, orientationLabels.data(), static_cast<int>(orientationLabels.size()),
-                     pendingOrientation, [this](int idx) {
-                       pendingOrientation = idx;
+    // Only the orientations this build offers — orientationLabels stays indexed
+    // by the RAW ORIENTATION value, and ORIENTATION_CHOICES picks the subset.
+    // The popup index is therefore a position in that list, not an orientation.
+    StrId orientIds[CrossPointSettings::ORIENTATION_CHOICE_COUNT];
+    for (uint8_t i = 0; i < CrossPointSettings::ORIENTATION_CHOICE_COUNT; ++i) {
+      orientIds[i] = orientationLabels[CrossPointSettings::ORIENTATION_CHOICES[i]];
+    }
+    optionPopup.show(StrId::STR_ORIENTATION, orientIds, CrossPointSettings::ORIENTATION_CHOICE_COUNT,
+                     CrossPointSettings::orientationChoiceIndex(pendingOrientation), [this](int idx) {
+                       pendingOrientation = CrossPointSettings::ORIENTATION_CHOICES[idx];
                        // Rotate the menu immediately. Only the renderer turns;
                        // SETTINGS.orientation stays unchanged so the reader's
                        // result handler still detects the change and reflows.

@@ -67,6 +67,50 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     ORIENTATION_COUNT
   };
 
+  // --- Orientations this build offers -------------------------------------------
+  // A FILTER over ORIENTATION, never a renumbering: the persisted indices above
+  // are untouched, so a settings.json written by a build that offered portrait
+  // still loads and simply folds through normalizeOrientation() on the way in.
+  //
+  // The X4 Pro is used in the panel's native 800x480 landscape and portrait is
+  // not reachable on it at all -- not merely defaulted away from -- so its list
+  // is the two landscape modes, i.e. a 180-degree flip, with the native scan
+  // first. Every other board keeps all four. ORIENTATION_CHOICES[0] is also the
+  // frame every non-reader screen lays out in (UI_ORIENTATION below), so on a
+  // board with no portrait the whole UI follows the reader into landscape
+  // rather than flipping the frame back and forth around it.
+  //
+  // If an X4 Pro comes up upside down, swap these two entries: that is the only
+  // thing here that depends on how the panel is mounted, which the board
+  // profile still carries as NO_FLIP "pending hardware".
+#if FREEINK_DEVICE_X4PRO
+  static constexpr uint8_t ORIENTATION_CHOICES[] = {LANDSCAPE_CCW, LANDSCAPE_CW};
+#else
+  static constexpr uint8_t ORIENTATION_CHOICES[] = {PORTRAIT, LANDSCAPE_CW, INVERTED, LANDSCAPE_CCW};
+#endif
+  static constexpr uint8_t ORIENTATION_CHOICE_COUNT = static_cast<uint8_t>(sizeof(ORIENTATION_CHOICES));
+  // True while all four modes are offered — i.e. while portrait exists at all.
+  // Guards the places that still present a four-way orientation picker.
+  static constexpr bool hasPortraitOrientation() { return ORIENTATION_CHOICE_COUNT == ORIENTATION_COUNT; }
+  // The frame home, the file browser, settings, the control centre and the
+  // sleep screens lay out in.
+  static constexpr uint8_t UI_ORIENTATION = ORIENTATION_CHOICES[0];
+
+  static constexpr uint8_t orientationChoiceIndex(const uint8_t value) {
+    for (uint8_t i = 0; i < ORIENTATION_CHOICE_COUNT; ++i) {
+      if (ORIENTATION_CHOICES[i] == value) return i;
+    }
+    return 0;
+  }
+  // Fold any stored or incoming orientation onto one this build offers.
+  static constexpr uint8_t normalizeOrientation(const uint8_t value) {
+    return ORIENTATION_CHOICES[orientationChoiceIndex(value)];
+  }
+  static constexpr uint8_t cycleOrientation(const uint8_t value, const int delta) {
+    const int count = ORIENTATION_CHOICE_COUNT;
+    return ORIENTATION_CHOICES[((orientationChoiceIndex(value) + delta) % count + count) % count];
+  }
+
   // Front button layout options (legacy)
   // Default: Back, Confirm, Left, Right
   // Swapped: Left, Right, Back, Confirm
@@ -295,9 +339,24 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // is a default member initialiser on a global, so it must not depend on
   // another global's initialisation order.
   uint8_t shortPwrBtn = FREEINK_DEVICE_X4PRO ? PWR_CONTROL_CENTER : IGNORE;
+  // --- Settings-file revision ---------------------------------------------------
+  // A DEFAULT ONLY CHANGES WHAT AN ABSENT KEY MEANS. Every field above is
+  // written to settings.json on every save, so once a device has saved once, the
+  // stored value wins over any later change to the initialiser -- which is
+  // exactly how a device that ran an older build ended up with a power button
+  // that did not open the control centre (see the migration in fromJson).
+  // Changing a default that shipped therefore needs a migration keyed on this
+  // revision, not just a new initialiser. Bump it when you add one; absent in
+  // the file means 0, i.e. everything written before revisions existed.
+  static constexpr uint8_t SETTINGS_REV = 1;
+  // Not in SettingsList and not user-visible: read and written by hand in
+  // fromJson()/toJson() alongside the other manually-persisted fields.
+  uint8_t settingsRev = 0;
   // EPUB reading orientation settings
-  // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
-  uint8_t orientation = PORTRAIT;
+  // 0 = portrait, 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise.
+  // The default is the first orientation this build offers (see
+  // ORIENTATION_CHOICES): portrait everywhere except the X4 Pro, which has none.
+  uint8_t orientation = ORIENTATION_CHOICES[0];
   // Button layouts (front layout retained for migration only)
   uint8_t frontButtonLayout = BACK_CONFIRM_LEFT_RIGHT;
   uint8_t sideButtonLayout = PREV_NEXT;

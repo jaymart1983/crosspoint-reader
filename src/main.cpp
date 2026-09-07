@@ -35,6 +35,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
+#include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #if FREEINK_CAP_NETWORK
@@ -374,6 +375,12 @@ void setupDisplayAndFonts(bool seamless = false) {
 
   display.begin(seamless);
   renderer.begin();
+  // Every screen that is not a reader page lays out in the device's UI frame:
+  // portrait on boards that have a portrait mode, the panel's native 800x480
+  // landscape on the X4 Pro, which has none (CrossPointSettings::
+  // ORIENTATION_CHOICES). Set here rather than only on the way out of a book,
+  // so the very first paint is already in it.
+  ReaderUtils::applyUiOrientation(renderer);
   activityManager.begin();
   LOG_DBG("MAIN", "Display initialized");
 

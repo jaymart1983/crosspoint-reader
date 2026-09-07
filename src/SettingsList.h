@@ -307,10 +307,20 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Toggle(StrId::STR_HYPHENATION, &CrossPointSettings::hyphenationEnabled, "hyphenationEnabled",
                             StrId::STR_CAT_READER)
             .withTextSettings(),
+#if FREEINK_DEVICE_X4PRO
+// Reading orientation is gone from Settings on this board: portrait does not
+// exist here (CrossPointSettings::ORIENTATION_CHOICES) and the whole UI follows
+// the reader into the panel's native landscape, so the only thing left to
+// choose is a 180-degree flip — which the control centre's orientation tile
+// already is. The field is still persisted, by hand in
+// CrossPointSettings::toJson/fromJson, because dropping the entry drops it out
+// of the generic loop that would otherwise carry it.
+#else
         SettingInfo::Enum(
             StrId::STR_ORIENTATION, &CrossPointSettings::orientation,
             {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW},
             "orientation", StrId::STR_CAT_READER),
+#endif
         SettingInfo::Toggle(StrId::STR_EXTRA_SPACING, &CrossPointSettings::extraParagraphSpacing,
                             "extraParagraphSpacing", StrId::STR_CAT_READER)
             .withTextSettings(),

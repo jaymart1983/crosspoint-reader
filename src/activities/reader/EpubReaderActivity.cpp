@@ -148,6 +148,15 @@ void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string&
   }
 }
 
+// Label for a RAW ORIENTATION index — keyed to the enum, not to the subset a
+// board offers, so it reads correctly whichever subset that is.
+StrId orientationLabelFor(const uint8_t orientation) {
+  static constexpr StrId kOrient[] = {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED,
+                                      StrId::STR_LANDSCAPE_CCW};
+  static_assert(std::size(kOrient) == CrossPointSettings::ORIENTATION_COUNT, "orientation labels");
+  return kOrient[orientation % CrossPointSettings::ORIENTATION_COUNT];
+}
+
 }  // namespace
 
 EpubReaderActivity::~EpubReaderActivity() {
@@ -634,10 +643,10 @@ void EpubReaderActivity::loop() {
   }
 
   if (longPress && SETTINGS.longPressButtonBehavior == SETTINGS.ORIENTATION_CHANGE) {
-    const uint8_t newOrientation =
-        nextTriggered ? (SETTINGS.orientation - 1 + SETTINGS.ORIENTATION_COUNT) % SETTINGS.ORIENTATION_COUNT
-                      : (SETTINGS.orientation + 1) % SETTINGS.ORIENTATION_COUNT;
-    applyOrientation(newOrientation);
+    // Steps through the orientations this build offers, not the raw enum: on a
+    // board with no portrait that is a two-entry list, so the hold is a
+    // 180-degree flip either way round.
+    applyOrientation(CrossPointSettings::cycleOrientation(SETTINGS.orientation, nextTriggered ? -1 : 1));
     requestUpdate();
     return;
   }
@@ -988,7 +997,13 @@ void EpubReaderActivity::applyInitialOrientation() {
   appliedOrientation = SETTINGS.orientation;
 }
 
-void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
+void EpubReaderActivity::applyOrientation(const uint8_t requestedOrientation) {
+  // The one choke point where the reader's orientation changes, so it is also
+  // where an orientation this build does not offer is folded onto one it does
+  // (on the X4 Pro: anything portrait becomes landscape). Callers that read a
+  // raw index — a stored setting, a menu row, a long-press cycle — therefore
+  // cannot reintroduce portrait behind the pickers.
+  const uint8_t orientation = CrossPointSettings::normalizeOrientation(requestedOrientation);
   // Also runs when SETTINGS already holds the new value but this layout was
   // built for the old one — that is what an external change looks like here.
   if (SETTINGS.orientation == orientation && appliedOrientation == orientation) {
@@ -2334,13 +2349,10 @@ std::string EpubReaderActivity::moreRowName(int row) const {
 
 std::string EpubReaderActivity::moreRowValue(int row) const {
   using MA = EpubReaderMenuActivity::MenuAction;
-  static constexpr StrId kOrient[] = {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW, StrId::STR_ORIENTATION_INVERTED,
-                                      StrId::STR_LANDSCAPE_CCW};
-  static_assert(std::size(kOrient) == CrossPointSettings::ORIENTATION_COUNT, "orientation labels");
   if (row < 0 || row >= static_cast<int>(moreItems.size())) return "";
   switch (moreItems[row].action) {
     case MA::ROTATE_SCREEN:
-      return I18N.get(kOrient[SETTINGS.orientation % CrossPointSettings::ORIENTATION_COUNT]);
+      return I18N.get(orientationLabelFor(SETTINGS.orientation));
     case MA::AUTO_PAGE_TURN:
       return (autoTurnOption == 0 || autoTurnOption >= static_cast<int>(std::size(PAGE_TURN_RATES)))
                  ? std::string(tr(STR_STATE_OFF))
@@ -2361,13 +2373,18 @@ void EpubReaderActivity::activateMoreRow(int row) {
   // In-place toggles keep the panel open and re-render the page beneath it.
   switch (action) {
     case MA::ROTATE_SCREEN: {
-      static constexpr StrId kOrientIds[] = {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW,
-                                             StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};
-      static_assert(std::size(kOrientIds) == CrossPointSettings::ORIENTATION_COUNT, "orientation options");
-      overlayPopup.show(StrId::STR_ORIENTATION, kOrientIds, static_cast<int>(std::size(kOrientIds)),
-                        SETTINGS.orientation % CrossPointSettings::ORIENTATION_COUNT, [this](int idx) {
-                          if (idx == SETTINGS.orientation) return;
-                          applyOrientation(static_cast<uint8_t>(idx));
+      // Only the orientations this build offers, so the row cannot put a board
+      // that has no portrait back into one. The popup index is a position in
+      // ORIENTATION_CHOICES, not a raw ORIENTATION value — mapped back below.
+      StrId orientIds[CrossPointSettings::ORIENTATION_CHOICE_COUNT];
+      for (uint8_t i = 0; i < CrossPointSettings::ORIENTATION_CHOICE_COUNT; ++i) {
+        orientIds[i] = orientationLabelFor(CrossPointSettings::ORIENTATION_CHOICES[i]);
+      }
+      overlayPopup.show(StrId::STR_ORIENTATION, orientIds, CrossPointSettings::ORIENTATION_CHOICE_COUNT,
+                        CrossPointSettings::orientationChoiceIndex(SETTINGS.orientation), [this](int idx) {
+                          const uint8_t picked = CrossPointSettings::ORIENTATION_CHOICES[idx];
+                          if (picked == SETTINGS.orientation) return;
+                          applyOrientation(picked);
                           // The stored page is laid out for the old orientation.
                           discardOverlayPage();
                           requestUpdate();

@@ -75,8 +75,8 @@ Alternatively, while reading a book, press the **Confirm** button to open the re
 
 The X4 Pro has a built-in frontlight with adjustable brightness and warmth. It is controlled from a swipe panel rather than the Settings menu:
 
-* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen — or **tap the Power button**, which works from any screen including while reading. A **~1 second hold** on the Power button closes it again. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, **Frontlight**, **Touch**, **Sleep**, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
-* **Quick toggle:** The **Frontlight** tile in the control centre turns the light on or off in one tap, and so does a **double tap of the Power button** from anywhere.
+* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen — or **tap the Power button**, which works from any screen including while reading. A **~1 second hold** on the Power button closes it again. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, **Touch**, **Sleep**, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
+* **Quick toggle:** The **sun button** beside the brightness slider turns the light on or off in one tap, and so does a **double tap of the Power button** from anywhere. (There is no separate Frontlight tile — it was the same switch twice.)
 
 > [!NOTE]
 > Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the control centre is the only place to adjust them.
@@ -160,7 +160,8 @@ above keep working, so the device stays usable.
 With touch off, the control centre becomes a button-driven menu: **tap Power**
 to open it, use the side keys to move the highlight from tile to tile, and
 **hold Right** to select. The Touch tile turns the glass back on. In this mode
-the side keys move the highlight rather than stepping brightness.
+the side keys move the highlight rather than stepping brightness; the light is
+still reachable with a **double tap of the Power button**.
 
 This is deliberately not saved: the touchscreen always comes back on after a
 reboot or a wake, so it can never lock you out.
@@ -352,6 +353,11 @@ The Settings screen allows you to configure the device's behavior. There are a f
   - "Landscape CW" - Landscape, rotated clockwise
   - "Inverted" - Portrait, upside down
   - "Landscape CCW" - Landscape, rotated counter-clockwise
+  
+  *Not shown on the X4 Pro.* That device runs entirely in its panel's native
+  800x480 landscape — portrait is not offered anywhere on it, in the reader or
+  outside it — so the only orientation choice left is a 180-degree flip, which
+  the control centre's orientation tile already is.
 
 - **Extra Paragraph Spacing**: Set how to handle paragraph breaks:
   
@@ -722,7 +728,7 @@ Available options include:
 - **Select Chapter** – Open the table of contents to jump to a specific chapter (see [Chapter Selection](#51-chapter-selection) below).
 - **Footnotes** – Navigate to the footnotes for the current section *(only shown in books that contain footnotes)*.
 - **Look Up** – Select a word on the current page and show its dictionary definition (see [docs/dictionary.md](docs/dictionary.md)). Requires a dictionary to be selected in **Settings → Reader → Dictionary**.
-- **Reading Orientation** – Cycle through screen orientations without leaving the reader.
+- **Reading Orientation** – Cycle through the screen orientations this device offers, without leaving the reader. (On the X4 Pro that is the two landscape modes: a 180-degree flip.)
 - **Auto Turn (Pages Per Minute)** – Cycle through automatic page turn speed options for hands-free reading.
 - **Go to %** – Jump to a specific position in the book by percentage.
 - **Take screenshot** – Save a screenshot of the current page to the `screenshots/` folder.

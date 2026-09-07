@@ -42,6 +42,15 @@ inline void applyOrientation(GfxRenderer& renderer, const uint8_t orientation) {
   }
 }
 
+// The frame every screen that is NOT a reader page lays out in: home, the file
+// browser, settings, the control centre, the sleep screens. Portrait on every
+// board that has a portrait mode; the panel's native landscape on the X4 Pro,
+// which has none (CrossPointSettings::ORIENTATION_CHOICES). Reader activities
+// call it on the way out so the screen underneath is put back in the UI frame.
+inline void applyUiOrientation(GfxRenderer& renderer) {
+  applyOrientation(renderer, CrossPointSettings::UI_ORIENTATION);
+}
+
 struct PageTurnResult {
   bool prev;
   bool next;

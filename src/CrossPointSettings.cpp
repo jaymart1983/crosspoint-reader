@@ -83,6 +83,17 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
     }
   }
 
+  // Schema revision — always the CURRENT one: this document is being written by
+  // this build, so every migration below has already been applied to it.
+  doc["settingsRev"] = SETTINGS_REV;
+#if !FREEINK_DEVICE_X4PRO
+  // Reading orientation is a plain Enum in SettingsList on boards that offer
+  // portrait, so the generic loop above already wrote it. The X4 Pro drops that
+  // entry (portrait does not exist there, see ORIENTATION_CHOICES) and persists
+  // the field by hand instead — same key, same raw ORIENTATION index.
+#else
+  doc["orientation"] = orientation;
+#endif
   // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
   doc["frontButtonBack"] = frontButtonBack;
   doc["frontButtonConfirm"] = frontButtonConfirm;
@@ -184,6 +195,38 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
       }
       s.*(info.valuePtr) = v;
     }
+  }
+
+  // --- Schema migrations --------------------------------------------------------
+  // Absent means 0: a file written before revisions existed.
+  const uint8_t storedRev = doc["settingsRev"] | static_cast<uint8_t>(0);
+  settingsRev = SETTINGS_REV;
+  if (storedRev < SETTINGS_REV) needsResave = true;
+
+#if FREEINK_DEVICE_X4PRO
+  // Rev 1: the X4 Pro's power tap became Control Centre. It used to be Confirm,
+  // and the generic loop above has just restored that stored 5 over the new
+  // default — a default only decides what an ABSENT key means, and every device
+  // that ran the earlier build has the key. Symptom on hardware: the tap acted
+  // as Select and the control centre could not be opened at all. Only the value
+  // the old build defaulted to is rewritten; a user who has since chosen
+  // anything else (including Confirm again, from rev 1 on) keeps their choice.
+  if (storedRev < 1 && shortPwrBtn == PWR_CONFIRM) {
+    shortPwrBtn = PWR_CONTROL_CENTER;
+    LOG_INF("CPS", "Migrated shortPwrBtn Confirm -> Control Centre (settings rev %u -> %u)", storedRev, SETTINGS_REV);
+  }
+  // Reading orientation: persisted by hand here, because the SettingsList entry
+  // that would otherwise carry it is compiled out on this board (portrait does
+  // not exist, so there is nothing left to pick between in a settings row).
+  orientation = doc["orientation"] | orientation;
+#endif
+  // Fold a stored orientation onto one this build actually offers. On a board
+  // with all four this is the identity; on the X4 Pro it is what turns a
+  // portrait or inverted value written by an older build into landscape.
+  const uint8_t normalizedOrientation = normalizeOrientation(orientation);
+  if (normalizedOrientation != orientation) {
+    orientation = normalizedOrientation;
+    needsResave = true;
   }
 
   if (doc["sleepTimeoutMinutes"].isNull() && !doc["sleepTimeout"].isNull()) {
