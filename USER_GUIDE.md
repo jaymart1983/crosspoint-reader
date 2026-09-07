@@ -16,6 +16,9 @@ Welcome to the **CrossPoint** firmware. This guide outlines the hardware control
     - [3.3 Browse Files Screen](#33-browse-files-screen)
     - [3.4 Recent Books Screen](#34-recent-books-screen)
     - [3.5 File Transfer Screen](#35-file-transfer-screen)
+    - [3.5.2 Bluetooth](#352-bluetooth)
+    - [3.5.3 USB Drive](#353-usb-drive)
+    - [3.5.4 Firmware updates from the SD card](#354-firmware-updates-from-the-sd-card)
     - [3.5.1 Calibre Wireless Transfers](#351-calibre-wireless-transfers)
       - [Installing the Plugin in Calibre](#installing-the-plugin-in-calibre)
       - [Configuring the CrossPoint Plugin in Calibre](#configuring-the-crosspoint-plugin-in-calibre)
@@ -179,7 +182,7 @@ Upon turning the device on for the first time, you will be placed on the **[Home
 
 ### 3.1 Home Screen
 
-The Home screen is the main entry point to the firmware. From here you can navigate to **[Reading Mode](#4-reading-mode)** with the most recently read book, the **[Browse Files](#33-browse-files-screen)** screen, the **[Recent Books](#34-recent-books-screen)** screen, the **[File Transfer](#35-file-transfer-screen)** screen, or **[Settings](#36-settings)**.
+The Home screen is the main entry point to the firmware. From here you can navigate to **[Reading Mode](#4-reading-mode)** with the most recently read book, the **[Browse Files](#33-browse-files-screen)** screen, the **[Recent Books](#34-recent-books-screen)** screen, the **[File Transfer](#35-file-transfer-screen)** screen (Wi-Fi builds only), or **[Settings](#36-settings)**.
 
 ### 3.2 Reading Mode
 
@@ -201,14 +204,15 @@ The Recent Books screen lists the most recently opened books in a chronological 
 ### 3.5 File Transfer Screen
 
 > [!IMPORTANT]
-> **The X4 Pro build has no Wi-Fi.** It is app-only over Bluetooth, so its File
-> Transfer screen offers **USB Drive** and **Bluetooth Transfer** and nothing
-> else. Everything in the rest of this section — the web server, WebDAV, the web
-> settings page, Calibre Wireless, OPDS catalogues, KOReader sync and firmware
-> updates over Wi-Fi — is absent from that build, not hidden. Firmware updates
-> arrive over Bluetooth from the companion app, or from a `firmware.bin` on the
-> SD card. Books and screenshots move over Bluetooth or by mounting the device
-> as a USB drive.
+> **The X4 Pro build has no Wi-Fi, and no File Transfer screen at all.** Nothing
+> on that build needs starting: Bluetooth is on whenever the device is awake, and
+> plugging in a USB cable mounts the SD card by itself. Everything in the rest of
+> this section — the web server, WebDAV, the web settings page, Calibre Wireless,
+> OPDS catalogues, KOReader sync and firmware updates over Wi-Fi — is absent from
+> that build, not hidden. See **[3.5.2 Bluetooth](#352-bluetooth)**,
+> **[3.5.3 USB Drive](#353-usb-drive)** and
+> **[3.5.4 Firmware updates from the SD card](#354-firmware-updates-from-the-sd-card)**,
+> which apply to every build.
 
 The File Transfer screen allows you to upload and manage files on the device. When you enter the screen, choose **Join a Network**, **Calibre Wireless**, or **Create Hotspot**. The reader then starts the web server for the selected mode.
 
@@ -266,6 +270,72 @@ The CrossPoint plugin will connect to your device, create a folder for the book'
 #### Removing a Book
 
 Books cannot be removed from your device through Calibre. Use the web interface instead.
+
+### 3.5.2 Bluetooth
+
+Bluetooth is **always on while the reader is awake**. It stops when the device sleeps and comes back when it wakes.
+There is nothing to start and no screen to keep open — the companion app can reach the reader while you are reading a
+book, sitting on the home screen, or anywhere else.
+
+Pairing happens in exactly one place: **Settings > Bluetooth**.
+
+- **Not paired yet:** the page shows a six-digit code. Type it into the app. The reader remembers the phone the
+  instant the code is accepted, so the two sides agree from that moment on — you should never have to type it twice.
+- **Already paired:** the page shows which phone is paired and whether it is currently connected, and offers
+  **Forget**.
+
+The code is on that page whether or not a phone is paired, and it stays on it even when a connection attempt fails —
+if the app ever reports that the reader does not recognise it, open Settings > Bluetooth and pair again with the code
+that is already on the screen.
+
+The reader remembers **one** phone at a time. Pairing a second replaces the first.
+
+### 3.5.3 USB Drive
+
+Plug the reader into a computer while it is awake and it mounts the SD card as a USB drive on its own. There is no
+menu to find. Eject the drive on your computer, or unplug the cable, and the reader restarts back to the home screen.
+
+Two details worth knowing:
+
+- **A reader that was asleep or off when you plugged it in does not mount.** It boots normally instead. That is
+  deliberate — it keeps the USB serial console available for flashing firmware with `esptool`, which is the reason
+  most people plug a reader into a computer in the first place. Wake the device first, then plug in, if you want the
+  drive.
+- **A wall charger looks like a computer at first.** The reader mounts, waits about twenty seconds for a computer that
+  is never going to answer, and then restarts to the home screen. Press **Back** to skip the wait.
+
+### 3.5.4 Firmware updates from the SD card
+
+Copy a firmware image into a folder called `firmware` at the root of the SD card, together with a small text file
+holding its checksum:
+
+```
+/firmware/firmware.bin
+/firmware/firmware.bin.sha256
+```
+
+The `.sha256` file contains the SHA-256 of the image. The output of `sha256sum firmware.bin` works as-is:
+
+```
+9f2c…a1  firmware.bin
+```
+
+On macOS use `shasum -a 256 firmware.bin`; on Windows, `certutil -hashfile firmware.bin SHA256` (paste just the hash).
+
+Eject the drive. Within about half a minute the reader notices the new image, checks it against the checksum, and — if
+it matches, and only then — asks whether to install it. Confirm and it flashes and reboots; both files are deleted
+afterwards so you are not asked again. Decline and nothing is deleted; the reader simply stops asking about that image
+until you replace it or restart the device.
+
+The companion app writes the same two files over Bluetooth, so an app-delivered update and a hand-copied one are the
+same thing arriving by different roads.
+
+> [!NOTE]
+> **The checksum is there to catch a bad copy, not to prove where the firmware came from.** Anyone who can write
+> `firmware.bin` onto the card can write `firmware.bin.sha256` beside it, so a matching checksum tells you the image is
+> intact — not that it is trustworthy. Only install firmware you obtained from a source you trust. What protects the
+> device from a broken or wrong-device image is the reader's own validation of the image, which runs twice, and the
+> confirmation prompt you answer on the device itself.
 
 ### 3.6 Settings
 
@@ -412,7 +482,8 @@ The Settings screen allows you to configure the device's behavior. There are a f
 
 - **Clear Reading Cache**: Clear the internal SD card cache.
 
-- **Check for updates** *(not on the X4 Pro build)*: Check for Crosspoint firmware updates over Wi-Fi. Firmware can also be updated without a USB connection by placing a `firmware.bin` file on the SD card — that route, and the companion app's Bluetooth firmware push, are the only two on the X4 Pro.
+- **Bluetooth**: Pair a phone, see which phone is paired, or forget it. This is the only pairing screen — see [3.5.2](#352-bluetooth). *(Only on builds with the Bluetooth link, such as the X4 Pro.)*
+- **Check for updates** *(not on the X4 Pro build)*: Check for Crosspoint firmware updates over Wi-Fi. Firmware can also be updated by dropping an image and its checksum into `/firmware` on the SD card — see [3.5.4](#354-firmware-updates-from-the-sd-card). That route is the only one on the X4 Pro, and the companion app uses it too.
 
 - **Language**: Set the UI language. CrossPoint supports 32 languages: English, Spanish, French, German, Czech, Brazilian Portuguese, European Portuguese, Russian, Swedish, Romanian, Catalan, Ukrainian, Belarusian, Italian, Polish, Finnish, Danish, Dutch, Turkish, Kazakh, Hungarian, Lithuanian, Slovenian, Valencian, Hebrew, Arabic, Slovak, Bosnian, Vietnamese, Norwegian Bokmål, Indonesian, and Orangutan.
 

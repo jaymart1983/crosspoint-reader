@@ -18,15 +18,18 @@
 #include "home/HomeActivity.h"
 #include "home/MoreMenuActivity.h"
 #include "home/RecentBooksActivity.h"
-#include "network/BleTransferActivity.h"
-#include "network/NetworkModeSelectionActivity.h"
 #include "network/UsbDriveActivity.h"
 #include "reader/ReaderActivity.h"
+#include "settings/SdFirmwareUpdateActivity.h"
 #include "settings/SettingsActivity.h"
+#if FREEINK_CAP_BLE_TRANSFER
+#include "network/BleStoreActivity.h"
+#endif
 #if FREEINK_CAP_NETWORK
 #include "OpdsServerStore.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "network/CrossPointWebServerActivity.h"
+#include "network/NetworkModeSelectionActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #endif
 #include "util/BmpViewerActivity.h"
@@ -139,7 +142,8 @@ void ActivityManager::loop() {
     bool controlCenterTap = false;
     if (mappedInput.hasTouch() &&
         (currentActivity->name == "Home" || currentActivity->name == "FileBrowser" ||
-         currentActivity->name == "Settings" || currentActivity->name == "NetworkModeSelection")) {
+         currentActivity->name == "Settings" || currentActivity->name == "BlePairing" ||
+         currentActivity->name == "NetworkModeSelection")) {
       int tx = 0;
       int ty = 0;
       const int width = renderer.getScreenWidth();
@@ -261,44 +265,35 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
   }
 }
 
-void ActivityManager::goToFileTransfer() {
 #if FREEINK_CAP_NETWORK
+// WiFi file transfer only. There is no File Transfer screen on a network-less
+// board any more: USB Drive mounts itself when a cable arrives (see the plug-edge
+// handler in main.cpp) and Bluetooth is up whenever the device is, so nothing
+// was left for a menu to start.
+void ActivityManager::goToFileTransfer() {
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
-#else
-  // No WiFi, so there is no web-server host to own the picker: the mode list is
-  // the whole screen and dispatches USB Drive / Bluetooth Transfer itself (see
-  // NetworkModeSelectionActivity::onModeSelected).
-  replaceActivity(std::make_unique<NetworkModeSelectionActivity>(renderer, mappedInput));
-#endif
 }
+#endif
 
-void ActivityManager::goToUsbDrive() {
+void ActivityManager::goToUsbDrive(const bool automatic) {
 #if FREEINK_CAP_USB_MSC
-  auto activity = makeUniqueNoThrow<UsbDriveActivity>(renderer, mappedInput);
+  auto activity = makeUniqueNoThrow<UsbDriveActivity>(renderer, mappedInput, automatic);
   if (!activity) {
     LOG_ERR("ACT", "OOM: USB Drive activity");
     return;
   }
   replaceActivity(std::move(activity));
 #else
+  (void)automatic;
   LOG_ERR("ACT", "USB Drive requested in a build without USB Drive capability");
 #endif
 }
 
 #if FREEINK_CAP_BLE_TRANSFER
-void ActivityManager::goToBluetoothTransfer() {
-  // -fno-exceptions: make_unique would abort on OOM, so match the
-  // no-throw pattern the rest of this file moved to.
-  auto activity = makeUniqueNoThrow<BleTransferActivity>(renderer, mappedInput);
-  if (!activity) {
-    LOG_ERR("ACT", "OOM: Bluetooth Transfer activity");
-    return;
-  }
-  replaceActivity(std::move(activity));
-}
-
 void ActivityManager::goToStore() {
-  auto activity = makeUniqueNoThrow<BleTransferActivity>(renderer, mappedInput, BleTransferActivity::Mode::STORE);
+  // -fno-exceptions: make_unique would abort on OOM, so match the no-throw
+  // pattern the rest of this file moved to.
+  auto activity = makeUniqueNoThrow<BleStoreActivity>(renderer, mappedInput);
   if (!activity) {
     LOG_ERR("ACT", "OOM: Store activity");
     return;
@@ -306,6 +301,17 @@ void ActivityManager::goToStore() {
   replaceActivity(std::move(activity));
 }
 #endif
+
+void ActivityManager::goToFirmwareUpdate(std::string path, const bool stagedDrop) {
+  auto activity = makeUniqueNoThrow<SdFirmwareUpdateActivity>(renderer, mappedInput, std::move(path), stagedDrop);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM: firmware update activity");
+    return;
+  }
+  // replaceActivity, not push: an update reboots the device, so there is nothing
+  // for a stack underneath it to come back to.
+  replaceActivity(std::move(activity));
+}
 
 void ActivityManager::goToMoreMenu() { replaceActivity(std::make_unique<MoreMenuActivity>(renderer, mappedInput)); }
 
@@ -377,10 +383,6 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
     } else if (activityName == "CrossPointWebServer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
 #endif
-    } else if (activityName == "NetworkModeSelection") {
-      initialMenuItem = HomeMenuItem::FILE_TRANSFER;
-    } else if (activityName == "BleTransfer") {
-      initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "Store") {
       initialMenuItem = HomeMenuItem::STORE;
     } else if (activityName == "MoreMenu") {

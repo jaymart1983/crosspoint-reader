@@ -54,7 +54,6 @@ STR_PRESS_OK_SCAN: "Націсніце OK для паўторнага пошук
 STR_JOIN_NETWORK: "Падключыцца да сеткі"
 STR_CREATE_HOTSPOT: "Стварыць кропку доступу"
 STR_USB_DRIVE: "USB-назапашвальнік"
-STR_USB_DRIVE_DESC: "Кіруйце картай SD з камп'ютара"
 STR_USB_DRIVE_PREPARING: "Падрыхтоўка USB-назапашвальніка..."
 STR_USB_DRIVE_WAITING: "Падключыце чыталку да камп'ютара"
 STR_USB_DRIVE_CONNECTED: "USB-назапашвальнік падключаны"

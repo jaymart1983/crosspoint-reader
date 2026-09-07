@@ -47,7 +47,8 @@ void UsbDriveActivity::loop() {
     }
   }
 
-  if (state == State::WaitingForHost && millis() - hostWaitStartedAt >= HOST_WAIT_TIMEOUT_MS) {
+  const unsigned long hostWaitTimeout = automatic ? AUTO_HOST_WAIT_TIMEOUT_MS : HOST_WAIT_TIMEOUT_MS;
+  if (state == State::WaitingForHost && millis() - hostWaitStartedAt >= hostWaitTimeout) {
     LOG_INF("USB", "USB Drive host wait timed out");
     restartToHome();
     return;

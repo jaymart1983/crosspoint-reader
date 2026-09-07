@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "BlePairingActivity.h"
 #include "ButtonRemapActivity.h"
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
@@ -85,6 +86,12 @@ void SettingsActivity::rebuildSettingsLists() {
     controlsSettings.insert(controlsSettings.begin(),
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
   }
+#if FREEINK_CAP_BLE_TRANSFER
+  // The only pairing UI on the device. Deliberately in System settings and
+  // nowhere else: a second entry point is how the old arrangement ended up with
+  // a screen that could hide the pairing code.
+  systemSettings.push_back(SettingInfo::Action(StrId::STR_BLUETOOTH, SettingAction::BluetoothPairing));
+#endif
 #if FREEINK_CAP_NETWORK
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
@@ -353,6 +360,15 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false), resultHandler);
         break;
 #endif
+#if FREEINK_CAP_BLE_TRANSFER
+      case SettingAction::BluetoothPairing:
+        if (auto activity = makeUniqueNoThrow<BlePairingActivity>(renderer, mappedInput)) {
+          startActivityForResult(std::move(activity), nullptr);
+        } else {
+          LOG_ERR("SETTINGS", "OOM: BlePairingActivity");
+        }
+        break;
+#endif
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
         break;
@@ -407,6 +423,9 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::Network:
       case SettingAction::CheckForUpdates:
       case SettingAction::DownloadFonts:
+#endif
+#if !FREEINK_CAP_BLE_TRANSFER
+      case SettingAction::BluetoothPairing:
 #endif
       case SettingAction::None:
         // Do nothing

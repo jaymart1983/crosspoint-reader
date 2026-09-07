@@ -18,6 +18,7 @@ enum class SettingAction {
   KOReaderSync,
   OPDSBrowser,
   Network,
+  BluetoothPairing,
   ClearCache,
   CheckForUpdates,
   SdFirmwareUpdate,

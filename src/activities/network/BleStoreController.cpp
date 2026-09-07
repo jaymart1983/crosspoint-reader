@@ -12,7 +12,7 @@
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "util/QrUtils.h"
+
 
 namespace {
 
@@ -430,7 +430,7 @@ void BleStoreController::drawCover(const std::string& path, const int x, const i
   file.close();
 }
 
-void BleStoreController::render(const std::string& sessionCode) const {
+void BleStoreController::render() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   renderer.clearScreen();
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight},
@@ -438,7 +438,7 @@ void BleStoreController::render(const std::string& sessionCode) const {
 
   switch (screen_) {
     case Screen::WAITING_APP:
-      renderWaiting(sessionCode);
+      renderWaiting();
       break;
     case Screen::LOADING:
       renderLoading();
@@ -462,28 +462,18 @@ void BleStoreController::render(const std::string& sessionCode) const {
   renderer.displayBuffer();
 }
 
-void BleStoreController::renderWaiting(const std::string& sessionCode) const {
+void BleStoreController::renderWaiting() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int pageWidth = renderer.getScreenWidth();
   const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
   int y = listTop();
 
-  // The Store has nothing of its own to show. Say that plainly rather than
-  // implying a catalogue exists somewhere on the device.
+  // A phone is paired but is not on the link right now. There is no code and no
+  // QR here any more: pairing is Settings > Bluetooth and nowhere else, and this
+  // screen has nothing to teach about it -- the phone is already known, it is
+  // simply not in range or not running the app.
   renderer.drawCenteredText(UI_12_FONT_ID, y, tr(STR_STORE_NEEDS_APP), true, EpdFontFamily::BOLD);
   y += lineHeight + metrics.verticalSpacing;
   renderer.drawCenteredText(UI_10_FONT_ID, y, tr(STR_STORE_NEEDS_APP_HINT));
-  y += lineHeight + metrics.verticalSpacing;
-
-  const int qrSize = std::min({172, pageWidth - metrics.contentSidePadding * 2,
-                               renderer.getScreenHeight() - y - lineHeight * 3 - metrics.buttonHintsHeight});
-  if (qrSize > 0) {
-    QrUtils::drawQrCode(renderer, Rect{(pageWidth - qrSize) / 2, y, qrSize, qrSize}, "https://ble.xteink.lol/");
-    y += qrSize + metrics.verticalSpacing;
-  }
-  if (!sessionCode.empty()) {
-    renderer.drawCenteredText(UI_10_FONT_ID, y, (std::string(tr(STR_BLE_TRANSFER_CODE)) + sessionCode).c_str(), true);
-  }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

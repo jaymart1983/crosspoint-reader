@@ -1,0 +1,285 @@
+#pragma once
+
+#include <BoardConfig.h>
+
+#if FREEINK_CAP_BLE_TRANSFER
+
+#include <HalStorage.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <mbedtls/sha256.h>
+
+#include <atomic>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <string>
+
+class BleStoreController;
+struct BleLinkRuntime;
+
+// The reader's Bluetooth link. One NimBLE peripheral, one hello/HMAC gate, one
+// framed upload path with credit flow control and SHA-256, one download path.
+//
+// WHY THIS IS NOT AN ACTIVITY. It used to be: BleTransferActivity owned the
+// radio, so the link existed only while its screen was open and died the moment
+// the user left. That made the phone app's job impossible -- it could not reach
+// a reader that was showing a book, and the Store could not ask the phone for a
+// catalogue page unless the radio happened to be up for another reason. The
+// radio is a property of the device being awake, not of any one screen, so it
+// lives here and is started once at boot (main.cpp) and stopped on the way into
+// deep sleep. Wake from deep sleep is a chip reset, so start-on-boot is also
+// start-on-wake.
+//
+// WHAT A SCREEN DOES INSTEAD. A screen that wants to show link state registers
+// as an Observer and is told when something changed; it repaints itself. The
+// Store additionally attaches its controller so the request channel has
+// somewhere to publish to. Neither owns the radio and neither can take it down.
+//
+// PAIRING lives in exactly one place, BlePairingActivity in Settings. A host is
+// written to flash the instant a `hello` carrying the right six-digit code also
+// carries a credential -- not after some later upload completes. The old
+// after-an-upload rule is what produced the deadlock this class was rebuilt to
+// end: the phone saved its half of the pairing immediately, the reader saved its
+// half only if the session happened to finish a transfer, and every later
+// reconnect authenticated against a credential the reader had never kept.
+class BleLink {
+ public:
+  enum class State {
+    STARTING,
+    ADVERTISING,
+    CONNECTED,
+    RECEIVING,
+    VERIFYING,
+    SAVED,
+    PREPARING,
+    SENDING,
+    SENT,
+    ERROR
+  };
+  enum class TransferKind {
+    NONE,
+    BOOK,
+    BMP,
+    FIRMWARE,
+    PROGRESS,
+    CRASH_REPORT,
+    LIBRARY,
+    PROGRESS_RESULT,
+    CATALOG_PAGE,
+    CATALOG_DETAIL
+  };
+
+  // A screen that paints something about the link. There is at most one: only
+  // the frontmost activity has anything to repaint, and an observer that is not
+  // on screen would be asking the render task to draw over whoever is.
+  class Observer {
+   public:
+    virtual ~Observer() = default;
+    virtual void onBleLinkChanged() = 0;
+  };
+
+  static BleLink& getInstance();
+
+  // The Web Bluetooth companion. A session constant, shown on the pairing page
+  // and published in `status` as browser_companion_url.
+  static const char* companionUrl();
+
+  // --- radio lifecycle -------------------------------------------------------
+  // Start the peripheral and begin advertising. Idempotent; safe to call when
+  // already running.
+  void begin();
+  // Stop advertising and take the stack down. Idempotent. Called on the way into
+  // deep sleep, where the modem power domain must not be held alive.
+  void end();
+  bool isRunning() const { return ble_ != nullptr; }
+  // Pump the events the NimBLE host task queued. Called once per main loop,
+  // whatever is on screen.
+  void tick();
+
+  // --- pairing ---------------------------------------------------------------
+  // The six-digit code for this session. Regenerated on begin(), so it is stable
+  // for as long as the device is awake -- a user reading it off the screen must
+  // not have it change underneath them.
+  const std::string& sessionCode() const { return sessionCode_; }
+  bool hasTrustedHost() const;
+  // The saved host's display name, or an empty string when nobody is paired.
+  std::string trustedHostLabel() const;
+  bool forgetTrustedHost();
+  // Why the last `hello` was refused, if it was. Never an error state: a refused
+  // hello leaves the session healthy, and the only recovery from one is to read
+  // the pairing code, so a refusal must never be what hides it.
+  const std::string& authError() const { return authErrorMessage_; }
+  bool isPeerConnected() const;
+  // The gate is open: a phone is connected AND authenticated.
+  bool isAuthenticated() const { return helloAccepted_; }
+
+  // --- store hosting ---------------------------------------------------------
+  // The Store screen lends its controller to the link for as long as it is on
+  // screen. The link owns no catalogue and no UI; the controller owns no radio.
+  void attachStore(BleStoreController* store);
+  void detachStore(const BleStoreController* store);
+  void armStoreBookFetch(const std::string& filename) { storeExpectedBook_ = filename; }
+  void publishStatusNow();
+
+  // --- observers -------------------------------------------------------------
+  void setObserver(Observer* observer) { observer_ = observer; }
+  void clearObserver(const Observer* observer) {
+    if (observer_ == observer) observer_ = nullptr;
+  }
+
+  State state() const { return state_; }
+  TransferKind transferKind() const { return transferKind_; }
+  const std::string& errorMessage() const { return errorMessage_; }
+  const std::string& fileName() const { return fileName_; }
+  size_t receivedBytes() const { return receivedBytes_; }
+  size_t expectedSize() const { return expectedSize_; }
+  // A transfer is in flight. The inactivity timer honours this, so a book
+  // arriving while the reader sits on the home screen is not cut off halfway by
+  // auto-sleep.
+  bool isBusy() const {
+    return transferOpen_ || downloadOpen_ || pendingCommit_ || state_ == State::VERIFYING ||
+           state_ == State::PREPARING;
+  }
+
+  // --- NimBLE host-task entry points ----------------------------------------
+  void enqueueBleConnected();
+  void enqueueBleDisconnected();
+  void enqueueControlWrite(const std::string& value);
+  void enqueueDataWrite(const std::string& value);
+  // Called from the NimBLE host task on connect and on every MTU exchange. Zero
+  // means "nothing negotiated". This is only a fallback: notifyCapBytes() asks
+  // the live connection what the MTU actually is and uses this when there is no
+  // connection to ask.
+  void noteBleMtu(uint16_t mtu);
+  // The most a notification may carry right now: ATT_MTU-3, never more than
+  // BLE_STATUS_NOTIFY_MAX_BYTES. Public because the runtime sizes frames by it.
+  size_t notifyCapBytes() const;
+
+  // READ is the authoritative document a GATT read returns -- everything the
+  // session knows. NOTIFY is the doorbell: the same document with the fields a
+  // client can re-read dropped, so it fits an ATT payload without truncation.
+  enum class StatusScope { READ, NOTIFY };
+  // `detail` narrows a NOTIFY document; it is ignored for READ. See
+  // STATUS_DETAIL_MAX in the .cpp for what each level keeps.
+  std::string buildStatusJson(StatusScope scope, unsigned detail) const;
+
+ private:
+  friend struct BleLinkRuntime;
+
+  BleLink() = default;
+
+  enum class BleEventType { CONNECTED, DISCONNECTED, CONTROL, DATA };
+  struct BleEvent {
+    BleEventType type;
+    std::string value;
+  };
+
+  // Borrowed from the Store screen for as long as that screen is up; null the
+  // rest of the time, which is most of the time.
+  BleStoreController* store_ = nullptr;
+  Observer* observer_ = nullptr;
+  // The one filename the store has armed a `book` upload for. A book upload in
+  // store mode that names anything else is refused: the device asked for a
+  // specific book and must not accept a different one in its place.
+  std::string storeExpectedBook_;
+
+  State state_ = State::STARTING;
+  std::unique_ptr<BleLinkRuntime> ble_;
+  HalFile uploadFile_;
+  HalFile downloadFile_;
+  SemaphoreHandle_t eventMutex_ = nullptr;
+  std::deque<BleEvent> bleEvents_;
+  size_t queuedBleEventBytes_ = 0;
+  bool bleEventOverflow_ = false;
+
+  std::string sessionCode_;
+  std::string fileName_;
+  std::string partPath_;
+  std::string finalPath_;
+  std::string expectedSha256_;
+  std::string savedPath_;
+  std::string errorMessage_;
+  // Why the last `hello` was refused, if it was. Deliberately not errorMessage_:
+  // a refused hello is not a failed session, and must never take the pairing
+  // code off the screen -- see setAuthError().
+  std::string authErrorMessage_;
+  std::string deviceId_;
+  std::string deviceNonce_;
+  std::string trustedHostName_;
+
+  TransferKind transferKind_ = TransferKind::NONE;
+  size_t expectedSize_ = 0;
+  size_t receivedBytes_ = 0;
+  size_t sentBytes_ = 0;
+  size_t lastProgressStatusBytes_ = 0;
+  size_t lastDisplayProgressBytes_ = 0;
+  // Outcome of the last `progress` batch. Deliberately not cleared by
+  // resetTransfer(): the client reads the summary from the status published when
+  // the batch finished, then issues a `start_get` for the per-entry document,
+  // and that start_get resets the transfer state.
+  uint32_t progressEntries_ = 0;
+  uint32_t progressApplied_ = 0;
+  size_t uploadChunkSize_ = 0;
+  size_t uploadAckBytes_ = 0;
+  size_t downloadChunkSize_ = 0;
+  uint32_t expectedSequence_ = 0;
+  uint32_t downloadSequence_ = 0;
+  uint32_t pendingDownloadAck_ = 0;
+  // Last MTU the peer negotiated, written from the NimBLE host task and read
+  // from the activity loop. 0 until an exchange happens; see notifyCapBytes().
+  std::atomic<uint16_t> negotiatedMtu_{0};
+  bool helloAccepted_ = false;
+  bool transferOpen_ = false;
+  bool downloadOpen_ = false;
+  bool downloadAwaitingAck_ = false;
+  bool trustedHelloAccepted_ = false;
+  bool hostPaired_ = false;
+  bool pendingCommit_ = false;
+  bool statusDirty_ = true;
+  bool removePartOnExit_ = false;
+  bool uploadResumable_ = false;
+  bool shaActive_ = false;
+  mbedtls_sha256_context shaContext_;
+
+  void enqueueBleEvent(BleEvent event);
+  void processBleEvents();
+  void onBleConnected();
+  void onBleDisconnected();
+  void onControlWrite(const std::string& value);
+  void onDataWrite(const std::string& value);
+  void processCommit();
+  void startFileDownload(const char* path, const char* name, TransferKind kind, size_t offset, size_t chunkSize);
+  void startCrashReportDownload(size_t offset, size_t chunkSize);
+  void startLibraryDownload(size_t offset, size_t chunkSize);
+  void startProgressResultDownload(size_t offset, size_t chunkSize);
+  void processProgressBatch();
+  void pumpDownload();
+  void resetTransfer(bool removePart);
+  void setState(State state);
+  void setError(const std::string& error);
+  // notifyStore=false refuses one request without failing the Store screen --
+  // used for an answer to a question the device is no longer asking, which is a
+  // normal race, not an error the user should see.
+  void setError(const std::string& error, bool notifyStore);
+  // A refused `hello`. Never State::ERROR: the pairing page shows the reason as a
+  // line under the code rather than in place of it, because a client whose
+  // credential this reader does not have can only recover BY reading that code.
+  void setAuthError(const std::string& error);
+  // Write the offered credential to flash. Called the moment a code-authenticated
+  // hello supplies one -- see the class comment.
+  bool saveTrustedHost(const std::string& hostId, const std::string& hostName, const std::string& secret);
+  // Tell whichever screen is up that something changed. Does nothing when the
+  // link is running behind a reader page, which is the normal case.
+  void notifyObserver();
+  void publishStatus();
+  // The largest NOTIFY document that fits `capBytes`, shrinking a level at a
+  // time. Never returns truncated JSON. Returns an empty string when not even
+  // `{"state":"..."}` fits, meaning "send no notification at all" -- an empty
+  // object parses as a status and reports as an unreadable one.
+  std::string buildNotifyJson(size_t capBytes) const;
+};
+
+#define BLE_LINK BleLink::getInstance()
+
+#endif  // FREEINK_CAP_BLE_TRANSFER

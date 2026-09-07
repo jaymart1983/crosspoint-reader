@@ -2,6 +2,17 @@
 
 #include <BoardConfig.h>
 
+// The WiFi transport chooser, and nothing else any more.
+//
+// It used to be the "File Transfer" menu: Join a Network, Calibre, Hotspot, USB
+// Drive and Bluetooth Transfer, side by side. The last two are gone from it,
+// because neither is something a user should have to start. USB Drive mounts
+// itself when a cable is plugged into an awake device, and the BLE link is up
+// for as long as the device is. What is left is the three WiFi modes, which
+// genuinely are a choice, and which only exist on a board with a network stack --
+// hence the guard around the whole file rather than around individual rows.
+#if FREEINK_CAP_NETWORK
+
 #include "activities/UiListActivity.h"
 
 enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, CREATE_HOTSPOT, USB_DRIVE, BLUETOOTH_TRANSFER };
@@ -11,33 +22,22 @@ enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, CREATE_HOTSPOT, USB_DRIV
  * - "Join a Network" - Connect to an existing WiFi network (STA mode)
  * - "Connect to Calibre" - Use Calibre wireless device transfers
  * - "Create Hotspot" - Create an Access Point that others can connect to (AP mode)
- * - "Bluetooth Transfer" - Use BLE transfer with the browser companion or CLI
  *
  * The onModeSelected callback is called with the user's choice.
  * The onCancel callback is called if the user presses back.
  *
  * The header stays on GUI.drawHeader for the battery indicator.
+ *
+ * NetworkMode keeps USB_DRIVE and BLUETOOTH_TRANSFER as enumerators: the value is
+ * carried in an ActivityResult that CrossPointWebServerActivity switches on, and
+ * removing enumerators from the middle would renumber the rest. No row produces
+ * them.
  */
 class NetworkModeSelectionActivity final : public UiListActivity {
  public:
   explicit NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
-  // Every row is capability-gated, so the count is computed rather than
-  // hardcoded: Join / Calibre / Hotspot need the network stack, USB Drive needs
-  // USB-MSC, Bluetooth Transfer needs BLE. On a FREEINK_CAP_NETWORK=0 board this
-  // list is USB Drive + Bluetooth Transfer, and it is a top-level screen rather
-  // than a sub-activity of the web server (see onModeSelected).
-  static constexpr int MENU_ITEM_COUNT = 0
-#if FREEINK_CAP_NETWORK
-                                         + 3
-#endif
-#if FREEINK_CAP_USB_MSC
-                                         + 1
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-                                         + 1
-#endif
-      ;
+  static constexpr int MENU_ITEM_COUNT = 3;
 
   void onModeSelected(NetworkMode mode);
   void onCancel();
@@ -54,3 +54,5 @@ class NetworkModeSelectionActivity final : public UiListActivity {
   // fixed-capacity storage that avoids any heap allocation for the row list.
   freeink::ui::ListItem rowItems_[MENU_ITEM_COUNT]{};
 };
+
+#endif  // FREEINK_CAP_NETWORK

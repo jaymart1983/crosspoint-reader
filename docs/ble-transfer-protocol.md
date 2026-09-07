@@ -1,6 +1,12 @@
 # BLE Transfer Protocol
 
-CrossPoint Reader exposes a small BLE transfer service while **File Transfer > Bluetooth Transfer** is open.
+CrossPoint Reader advertises this service **whenever the device is awake**. It is not owned by any screen: it
+starts at the end of boot, stops on the way into deep sleep, and comes back on wake (which is a chip reset, so
+"on wake" and "at boot" are the same code path). There is no Bluetooth Transfer screen any more, and there is no
+longer any screen a user has to find and keep open before a phone can reach the reader.
+
+Advertising runs at a deliberately slow interval — 1000-1285 ms — because this link is for occasional sync, not
+low latency. A scanning phone still finds the reader within a second or two.
 
 The browser companion is available at <https://ble.xteink.lol/>. Source and compatibility notes live at
 <https://github.com/marginalia-os/ble-xteink>.
@@ -24,21 +30,64 @@ Clients should discover the service by UUID. The user-visible name is not part o
 
 ## Authentication
 
-First use requires the six-digit code shown on the reader:
+First use requires the six-digit code, which lives on exactly one screen: **Settings > Bluetooth**. That page always
+shows the code — paired or not, connected or not, whatever the last failure was.
 
 ```json
 {"op":"hello","version":1,"code":"123456"}
 ```
 
-After code authentication, a client can include `pair_host_id`, `pair_host_name`, and `pair_secret` in the `hello`
-command. The reader prompts to save the trusted host after a successful authenticated upload. Trusted auth signs this
-message:
+The code is regenerated once per wake, not once per screen, so it is stable for as long as the device stays awake.
+
+### Pairing is saved immediately
+
+A client that wants to be remembered includes `pair_host_id`, `pair_host_name` and `pair_secret` in the same `hello`.
+**The reader writes the credential to flash the moment that hello is accepted.** There is no prompt and no later step.
+
+This is a behaviour change, and it is the whole reason this document was revised. The reader used to save a trusted
+host only through an on-device prompt that appeared *after a completed authenticated upload*. Every real client saves
+its half of the pairing as soon as it sends `pair_secret`, so a session that paired but never finished an upload left
+the two sides disagreeing: the client held a credential the reader had never kept, its next reconnect authenticated by
+HMAC against nothing, and the refusal used to be shown on an error screen that replaced the six-digit code — the one
+thing needed to recover. Both halves are now committed at the same instant.
+
+The user's consent is the six digits themselves. They were read off the reader's own pairing page and typed into the
+client; there is no second question worth asking.
+
+`save_host` still exists and is still accepted, but it now does nothing except republish `status`: by the time a client
+could send it, the credential is already saved.
+
+### Trusted auth
+
+Trusted auth signs this message:
 
 ```text
 {device_nonce}|{host_id}|1
 ```
 
 using HMAC-SHA256 with the saved secret.
+
+### When a hello is refused
+
+A refused `hello` is **not** a failed session and never enters `state: "error"`. The link stays up, the code stays on
+the pairing page, and the reason is reported in `status` as `auth_error` — a separate field from `error`, cleared by
+the next accepted hello. This matters because the only recovery from a refused trusted-host hello is to read that code.
+
+Read `auth_error` together with `has_trusted_host` to tell the cases apart:
+
+| `auth_error` | `has_trusted_host` | Meaning |
+| --- | --- | --- |
+| `unknown trusted host` | `false` | Nobody is paired here. Forget the saved credential and pair with the code. |
+| `unknown trusted host` | `true` | A different host is paired. Pair with the code to replace it. |
+| `invalid trusted host auth` | `true` | The credential is for this reader but the signature did not verify. |
+
+`has_trusted_host` is carried in notifications as well as in the GATT read, because a client that only listens to the
+doorbell needs it at exactly the moment its trusted hello was refused.
+
+### Forgetting
+
+The user forgets a phone from Settings > Bluetooth. There is no protocol operation for it: a client cannot make the
+reader forget anybody.
 
 ## Supported Operations
 
@@ -48,7 +97,8 @@ Supported upload kinds:
 
 - `book`: `.epub` saved under `/Books`
 - `bmp`: `.bmp` saved under `/Pictures`
-- `firmware`: `.bin` staged on SD card, validated, confirmed on device, then flashed through the OTA path
+- `firmware`: `.bin` **dropped into the watched folder** — see [Firmware updates](#firmware-updates). It is validated
+  on commit and then left there; nothing is flashed during the session
 - `progress`: a batch of reading positions to apply to books already on the card (see below)
 - `catalog_page`: one screen of the app's Calibre library, answering a `catalog_page` request (see
   [The Store](#the-store-requests-over-the-notify-channel))
@@ -63,7 +113,52 @@ Supported download kinds:
 - `progress_result`: the per-entry outcome of the last `progress` upload (see below)
 
 There are two further control ops that are not transfers: `set_time`, and `catalog_error` (the app declining
-a Store request it cannot answer).
+a Store request it cannot answer). `save_host` is accepted and does nothing (see
+[Pairing is saved immediately](#pairing-is-saved-immediately)).
+
+## Firmware updates
+
+A firmware push is now a **file drop**, not an interactive flow. The reader watches one folder:
+
+| Path | What it is |
+| --- | --- |
+| `/firmware/firmware.bin` | the ESP32 application image |
+| `/firmware/firmware.bin.sha256` | its SHA-256, as text |
+| `/firmware/.firmware.bin.part` | scratch: where a BLE upload accumulates before the rename |
+
+The companion file's **first whitespace-delimited token** is a 64-character hex SHA-256 of the image. That is exactly
+the first field of `sha256sum firmware.bin`, so the file a person writes by hand and the file the app writes are the
+same file. Case is not significant; a trailing newline is fine.
+
+Two routes put files there, and they are the same route:
+
+- **Over BLE.** `start_put` with `kind: "firmware"`, frames, `commit` — unchanged wire protocol. On commit the reader
+  validates the image (`firmware_flash::validateImageFile`: header magic, segment table, XOR checksum, SHA-256
+  trailer, chip id, board tag) and, if it passes, writes `/firmware/firmware.bin.sha256` itself from the digest it
+  just verified. The client does not send the hash file. `status` reports `state: "saved"`; a bad image reports
+  `state: "error"` with `error: "invalid firmware: <REASON>"` while the client is still connected to hear it.
+- **Over USB.** Plug the reader into a computer, copy both files onto the card, eject.
+
+The reader then checks the folder every 30 seconds, re-hashes the image off the card a few KB per main-loop tick, and
+only if the digest matches the companion file does it show an **on-device confirmation prompt**. Confirming runs the
+same validate-and-flash path the SD firmware update always used, then reboots. Both files are deleted after a
+successful flash so the new firmware does not come up and offer to install itself again. Declining does **not** delete
+anything: the reader simply stops offering that image until the file changes or the device reboots.
+
+### The hash file verifies integrity, not authenticity
+
+**This is not a signature and it is not a security boundary.** Anyone who can write `firmware.bin` can write
+`firmware.bin.sha256` in the same breath. The digest proves the bytes on the card are the bytes whoever wrote the hash
+intended to put there — it catches a truncated copy, an interrupted BLE upload, a failing SD card — and it proves
+nothing whatsoever about who wrote them.
+
+That is an accepted trade for a personal device: the SD card is already writable by anyone holding it, and USB access
+to the reader is already total control, so a signature here would be guarding a door in an open field. It is written
+down because it should be a decision on the record rather than a guarantee somebody infers from the word "hash".
+
+What actually protects the device from a bad image is unchanged and was never the hash: `validateImageFile()` runs
+twice (once when the file is staged, once at flash time, because the SD card is removable and that gap is real), and
+the user has to confirm on the device itself.
 
 The Store also runs **the other way round** — the device asks, the app answers — over the `status` notify
 channel. See [The Store](#the-store-requests-over-the-notify-channel).
@@ -123,7 +218,7 @@ Notes on the fields:
   this book last read") than the sync path needs; `timestamp` answers the precise one and is what clients should use.
 
 The document is streamed a book at a time, so it is never assembled in RAM. It is staged as
-`/.crosspoint/ble-library.json` for the duration of the transfer and removed when the transfer screen is closed. A
+`/.crosspoint/ble-library.json` for the duration of the transfer and removed when the link stops (deep sleep). A
 `start_get` at `offset: 0` rebuilds the listing; a non-zero `offset` resumes the document that the preceding
 `offset: 0` request staged, so a resumed download never straddles two different snapshots.
 
@@ -285,18 +380,23 @@ whose payload is a JSON array parallel to the upload, in the same order:
 ]
 ```
 
-It is staged at `/.crosspoint/ble-progress-result.json` and removed when the transfer screen is closed, so fetch it
-before disconnecting. A batch that fails as a whole (malformed JSON, over the entry cap, or an SD write error) reports
+It is staged at `/.crosspoint/ble-progress-result.json` and removed when the link stops (deep sleep), so fetch it
+in the same session. A batch that fails as a whole (malformed JSON, over the entry cap, or an SD write error) reports
 `state: "error"` and produces no result document.
 
 ### Currently-open book
 
-There is none, by construction. Reaching the Bluetooth Transfer screen goes through
-`ActivityManager::goToBluetoothTransfer()`, which calls `replaceActivity()` — that drops the current activity *and*
-the whole activity stack. A reader has therefore already run `onExit()`, written its final `progress.bin` and been
-destroyed before BLE advertising starts, and when the user next opens the book the reader loads its position from
-disk. So there is no in-memory reader state for an incoming write to fight: positions are applied immediately, none
-are deferred, and none are rejected on this account.
+**A `progress` batch is refused outright while a book is open.** `start_put` with `kind: "progress"` answers
+`state: "error"` with `error: "book open"`; retry when the user has left the reader.
+
+This used to be guaranteed by the architecture rather than checked: the Bluetooth Transfer screen was reached through
+`replaceActivity()`, which tore the reader down — final `progress.bin` written — before BLE advertising ever started.
+Now that the link outlives every screen, that guarantee is gone, and a batch applied underneath a live reader would be
+silently overwritten by that reader's own position when it exits. Refusing is worse for the client than succeeding and
+much better than appearing to succeed.
+
+Refused rather than deferred, deliberately: a client already knows how to retry, and a queue of pending shelf writes is
+a far larger thing to get right than a retry is.
 
 ### Where the timestamp lives
 
@@ -366,15 +466,19 @@ fits. It never truncates: a client always receives parseable JSON.
 | Dropped | Fields |
 | --- | --- |
 | first | `protocol_version`, `store_supported`, `clock_supported`, `device_time` |
-| then | `trusted_host`, `paired`, `pairing`, `mode`, `name`, `path` |
+| then | `has_trusted_host`, `trusted_host`, `paired`, `name`, `path` |
 | then | `pending` keeps only `req`, `op` and the `id`/`offset` an answer must quote back |
-| then | the transfer counters (`kind`, `received`, `sent`, `written`, `size`, `ack_bytes`, `resumable`, `entries`, `applied`) and the `error` text |
+| then | the transfer counters (`kind`, `received`, `sent`, `size`, `ack_bytes`, `resumable`, `entries`, `applied`) and the `error` / `auth_error` text |
 | last | `pending` |
 | floor | `{"state":"…"}`, and below that `{}` |
 
 `firmware_name`, `browser_companion_url`, `firmware_ota_supported`, `resume_supported`, `upload_kinds`,
-`download_kinds`, `device_id`, `device_nonce` and `has_trusted_host` are **read-only**: they are in the
-document a GATT read returns and in no notification at any size. None of them change within a session.
+`download_kinds`, `device_id` and `device_nonce` are **read-only**: they are in the document a GATT read returns and
+in no notification at any size. None of them change within a session.
+
+`has_trusted_host` was promoted out of that read-only set on purpose. It is the field that separates "you were never
+saved here, pair with the code" from "your credential is wrong", and a client that only listens to the doorbell needs
+it at exactly the moment its trusted hello was refused.
 
 In practice, at 180 bytes, a `pending` request is notified with its geometry intact and a transfer is
 notified with its byte counters intact — the two things a live session cannot work without, since
@@ -625,8 +729,14 @@ Status JSON includes capability fields so clients can hide unsupported controls:
 ```
 
 `device_time` is present only when the device knows the time; see [Device clock](#device-clock).
-`store_supported` says this firmware speaks the Store request protocol; `"mode": "store"` says the Store
-screen is the one currently open. **Every field above comes from a GATT read of `status`, not from a
+`store_supported` says this firmware speaks the Store request protocol. There is no longer a `"mode"` field: the link
+is not a screen and has no mode. `firmware_ota_supported` still means "this reader accepts the `firmware` upload
+kind"; what it does with it is now the file drop described above.
+
+The states `confirming`, `updating`, `restarting`, `save_host_prompt` and `forget_host_prompt` no longer exist —
+nothing the link does needs a prompt on screen any more. `has_trusted_host` and `auth_error` are new in notifications.
+
+**Every field above comes from a GATT read of `status`, not from a
 notification** — the whole document is ~570 bytes and no notification is large enough to carry it. Read the
 characteristic after subscribing and merge notifications over what it gave you; see
 [The Store](#the-store-requests-over-the-notify-channel) for the exact rule.

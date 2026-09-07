@@ -43,7 +43,12 @@
 #include "OpdsServerStore.h"
 #endif
 #include "images/LoadingIcon.h"
+#include "network/FirmwareStaging.h"
+#include "network/FirmwareWatcher.h"
 #include "platform/UsbSerialJtagHandoff.h"
+#if FREEINK_CAP_BLE_TRANSFER
+#include "network/BleLink.h"
+#endif
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
 
@@ -388,6 +393,13 @@ void enterDeepSleep(const bool fromTimeout) {
   }
 #endif
 
+#if FREEINK_CAP_BLE_TRANSFER
+  // Before the SD card goes: end() writes nothing, but it does close files and it
+  // must not be racing a mount teardown. Deep sleep would otherwise hold the
+  // modem power domain alive for a device nobody is using.
+  BLE_LINK.end();
+#endif
+
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
@@ -683,6 +695,17 @@ void setup() {
   }
 
   allowSleepAt = millis() + 2000;
+
+#if FREEINK_CAP_BLE_TRANSFER
+  // The radio belongs to the device being awake, not to any screen. Started here,
+  // once, after the first paint so it is not competing with boot for the SD bus
+  // and the display; stopped in enterDeepSleep(). Wake from deep sleep is a chip
+  // reset, so this is also where waking turns it back on.
+  //
+  // Except in firmware recovery, where the whole device exists to write one
+  // image to flash and nothing should be arriving over the air while it does.
+  if (!recoveryFirmwareMode) BLE_LINK.begin();
+#endif
 }
 
 void loop() {
@@ -713,6 +736,18 @@ void loop() {
     }
     return;
   }
+
+#if FREEINK_CAP_BLE_TRANSFER
+  // The link is pumped here rather than from an activity, because it outlives
+  // every activity. Below the exclusive-storage return above on purpose: while
+  // USB Drive owns the raw card there is no filesystem for a transfer to land on.
+  BLE_LINK.tick();
+#endif
+
+  // Look for a firmware image in the drop folder. Idle cost is two existence
+  // checks every thirty seconds; the hashing it may start is spread a few KB per
+  // tick so nothing here blocks a page turn.
+  FIRMWARE_WATCHER.tick();
 
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
@@ -751,7 +786,16 @@ void loop() {
   // touchscreen off (a palm resting on it while reading is the reason to switch
   // it off) a contact must not keep the inactivity timer alive either.
   const bool touchActivity = MappedInputManager::isTouchInputEnabled() && gpio.wasTouchActivity();
-  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || touchActivity || halTiltSensor.hadActivity() ||
+  const bool linkBusy =
+#if FREEINK_CAP_BLE_TRANSFER
+      BLE_LINK.isBusy();
+#else
+      false;
+#endif
+  // A book arriving over Bluetooth while the reader sits on the home screen is
+  // work, even though nobody is touching the device. Sleeping through it would
+  // drop the transfer at whatever byte it had reached.
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || touchActivity || halTiltSensor.hadActivity() || linkBusy ||
       activityManager.preventAutoSleep()) {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
@@ -868,6 +912,36 @@ void loop() {
   // page turn instead.
   if (gpio.wasUsbStateChanged() && !activityManager.isReaderActivity()) {
     activityManager.requestUpdate();
+  }
+
+#if FREEINK_CAP_USB_MSC
+  // USB Drive is what a cable MEANS now; there is no menu to pick it from.
+  //
+  // The latch is the whole subtlety. gpio's edge detector starts from
+  // "disconnected", so the first update() on a device that booted with a cable in
+  // reports a plug edge that never happened -- and that device is almost always
+  // one being flashed or watched over the serial console. So the edge only counts
+  // once this run has actually seen the cable out: plugging into a sleeping or
+  // powered-off reader boots it normally on USB Serial/JTAG and esptool keeps
+  // working, while plugging into an awake one mounts the card. Pressing Back on
+  // the mount screen reboots straight back to the serial personality.
+  static bool sawUsbUnplugged = false;
+  if (!gpio.isUsbConnected()) sawUsbUnplugged = true;
+  if (sawUsbUnplugged && gpio.wasUsbStateChanged() && gpio.isUsbConnected()) {
+    LOG_INF("USB", "cable plugged into an awake device; mounting the card");
+    activityManager.goToUsbDrive(/*automatic=*/true);
+    return;
+  }
+#endif
+
+  // A verified image is waiting in the drop folder. Not while a book is open --
+  // an update is a reboot, and interrupting someone's reading to offer one is the
+  // kind of thing that makes people turn updates off.
+  if (FIRMWARE_WATCHER.updateReady() && !activityManager.isReaderActivity() &&
+      !activityManager.preventAutoSleep()) {
+    FIRMWARE_WATCHER.standDown();
+    activityManager.goToFirmwareUpdate(firmware_staging::IMAGE_PATH, /*stagedDrop=*/true);
+    return;
   }
 
   const unsigned long activityStartTime = millis();

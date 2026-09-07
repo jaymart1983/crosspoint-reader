@@ -54,7 +54,6 @@ STR_PRESS_OK_SCAN: "Натисніть OK для повторного скану
 STR_JOIN_NETWORK: "Приєднатися до мережі"
 STR_CREATE_HOTSPOT: "Створити точку доступу"
 STR_USB_DRIVE: "USB-накопичувач"
-STR_USB_DRIVE_DESC: "Керуйте SD-картою з комп'ютера"
 STR_USB_DRIVE_PREPARING: "Підготовка USB-накопичувача..."
 STR_USB_DRIVE_WAITING: "Підключіть читалку до комп'ютера"
 STR_USB_DRIVE_CONNECTED: "USB-накопичувач підключено"

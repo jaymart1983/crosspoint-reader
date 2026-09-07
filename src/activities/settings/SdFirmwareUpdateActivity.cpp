@@ -13,11 +13,32 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/FirmwareFlasher.h"
+#include "network/FirmwareStaging.h"
+#include "network/FirmwareWatcher.h"
+#if FREEINK_CAP_BLE_TRANSFER
+#include "network/BleLink.h"
+#endif
 
 void SdFirmwareUpdateActivity::onEnter() {
   Activity::onEnter();
   // Build-identity marker — confirms which firmware build owns the SD update flow.
   LOG_INF("FW", "SdFirmwareUpdateActivity build=%s %s recovery=%d", __DATE__, __TIME__, recoveryMode ? 1 : 0);
+  if (presetPath) {
+    // Validate on the first render rather than here: onEnter() runs before the
+    // activity has painted anything, and validateFirmware() is seconds of SD
+    // work that would otherwise happen behind whatever screen was up last.
+    state = State::VALIDATING;
+    requestUpdateAndWait();
+    if (!validateFirmware()) {
+      RenderLock lock(*this);
+      state = State::FAILED;
+      requestUpdate();
+      return;
+    }
+    promptConfirmation();
+    return;
+  }
+
   state = State::PICKING;
   launchPicker();
 }
@@ -118,8 +139,10 @@ void SdFirmwareUpdateActivity::promptConfirmation() {
     RenderLock lock(*this);
     state = State::CONFIRMING;
   }
-  // Show "Update firmware?" with the file path as the body line.
-  std::string heading = tr(STR_FIRMWARE_UPDATE_PROMPT);
+  // Show "Update firmware?" with the file path as the body line. A drop the
+  // watcher found says so instead: the user did not pick this file, so the prompt
+  // has to explain where it came from before it asks anything.
+  std::string heading = stagedDrop ? tr(STR_FIRMWARE_DROP_FOUND) : tr(STR_FIRMWARE_UPDATE_PROMPT);
   // Use the basename only to keep the body short.
   std::string body = firmwarePath;
   const auto pos = body.find_last_of('/');
@@ -131,7 +154,12 @@ void SdFirmwareUpdateActivity::promptConfirmation() {
 
 void SdFirmwareUpdateActivity::onConfirmationResult(const ActivityResult& result) {
   if (result.isCancelled) {
-    if (recoveryMode) {
+    // Declining a staged drop does not delete it -- the watcher simply stops
+    // offering it until the file changes or the device reboots. Throwing away
+    // someone's firmware image because they pressed No once is not this code's
+    // call to make.
+    if (stagedDrop) FIRMWARE_WATCHER.standDown();
+    if (recoveryMode && !presetPath) {
       // Go back to the picker rather than exiting recovery.
       launchPicker();
       return;
@@ -152,6 +180,15 @@ void SdFirmwareUpdateActivity::onConfirmationResult(const ActivityResult& result
 
 void SdFirmwareUpdateActivity::performUpdate() {
   LOG_INF("FW", "SD update: %s (%u bytes)", firmwarePath.c_str(), static_cast<unsigned>(firmwareSize));
+
+#if FREEINK_CAP_BLE_TRANSFER
+  // Take the radio down first. Writing an OTA partition is a minute of raw erase
+  // and write with the watchdog held off; a NimBLE host task servicing a live
+  // connection through that is a risk with nothing to gain, and an upload landing
+  // on the card mid-flash is a worse one. The device reboots at the end of this
+  // function either way, and the reboot brings the link back.
+  BLE_LINK.end();
+#endif
 
   auto progressCb = +[](size_t written, size_t total, void* ctx) {
     auto* self = static_cast<SdFirmwareUpdateActivity*>(ctx);
@@ -181,6 +218,11 @@ void SdFirmwareUpdateActivity::performUpdate() {
     return;
   }
 
+  // The image is written and otadata already points at it. Clear the drop folder
+  // now, while the filesystem is still mounted and before the reboot, so the new
+  // firmware does not come up and immediately offer to install itself again.
+  if (stagedDrop) firmware_staging::clearStaged();
+
   LOG_INF("FW", "SD firmware update complete, restarting");
   {
     RenderLock lock(*this);
@@ -197,7 +239,7 @@ void SdFirmwareUpdateActivity::loop() {
     int y = 0;
     if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
         mappedInput.wasPressed(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(x, y)) {
-      if (recoveryMode) {
+      if (recoveryMode && !presetPath) {
         // Go back to picker so user can try a different .bin
         state = State::PICKING;
         launchPicker();

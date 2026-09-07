@@ -1,5 +1,7 @@
 #include "NetworkModeSelectionActivity.h"
 
+#if FREEINK_CAP_NETWORK
+
 #include <GfxRenderer.h>
 #include <I18n.h>
 
@@ -12,56 +14,24 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-#if FREEINK_CAP_NETWORK
     StrId::STR_JOIN_NETWORK,
     StrId::STR_CALIBRE_WIRELESS,
     StrId::STR_CREATE_HOTSPOT,
-#endif
-#if FREEINK_CAP_USB_MSC
-    StrId::STR_USB_DRIVE,
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-    StrId::STR_BLUETOOTH_TRANSFER,
-#endif
 };
 constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-#if FREEINK_CAP_NETWORK
     StrId::STR_JOIN_DESC,
     StrId::STR_CALIBRE_DESC,
     StrId::STR_HOTSPOT_DESC,
-#endif
-#if FREEINK_CAP_USB_MSC
-    StrId::STR_USB_DRIVE_DESC,
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-    StrId::STR_BLUETOOTH_TRANSFER_DESC,
-#endif
 };
 constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-#if FREEINK_CAP_NETWORK
     UIIcon::Wifi,
     UIIcon::Library,
     UIIcon::Hotspot,
-#endif
-#if FREEINK_CAP_USB_MSC
-    UIIcon::Usb,
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-    UIIcon::Transfer,
-#endif
 };
 constexpr NetworkMode menuModes[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-#if FREEINK_CAP_NETWORK
     NetworkMode::JOIN_NETWORK,
     NetworkMode::CONNECT_CALIBRE,
     NetworkMode::CREATE_HOTSPOT,
-#endif
-#if FREEINK_CAP_USB_MSC
-    NetworkMode::USB_DRIVE,
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-    NetworkMode::BLUETOOTH_TRANSFER,
-#endif
 };
 }  // namespace
 
@@ -112,23 +82,6 @@ void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {
 }
 
 void NetworkModeSelectionActivity::onModeSelected(NetworkMode mode) {
-#if !FREEINK_CAP_NETWORK
-  // No network stack means no CrossPointWebServerActivity to hand the choice
-  // back to, so this screen is pushed as a top-level activity and dispatches
-  // the two remaining transports itself.
-#if FREEINK_CAP_USB_MSC
-  if (mode == NetworkMode::USB_DRIVE) {
-    activityManager.goToUsbDrive();
-    return;
-  }
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-  if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
-    activityManager.goToBluetoothTransfer();
-    return;
-  }
-#endif
-#endif
   setResult(NetworkModeResult{mode});
   finish();
 }
@@ -139,3 +92,5 @@ void NetworkModeSelectionActivity::onCancel() {
   setResult(std::move(result));
   finish();
 }
+
+#endif  // FREEINK_CAP_NETWORK

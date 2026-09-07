@@ -64,8 +64,11 @@ SESSION_FACT_KEYS = (
     "clock_supported",
     "device_id",
     "device_nonce",
-    "has_trusted_host",
 )
+# NOT a session fact: has_trusted_host now rides notifications too, because a
+# client whose trusted hello was refused needs it at that exact moment to tell
+# "you were never saved here" from "your credential is wrong". Carrying the
+# read's value forward over a notification would hide the change.
 
 
 def session_facts(status: dict[str, Any]) -> dict[str, Any]:
@@ -621,7 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     put_bmp.add_argument("path")
     add_upload_common(put_bmp)
 
-    put_firmware = sub.add_parser("put-firmware", help="Upload and install a firmware .bin")
+    put_firmware = sub.add_parser(
+        "put-firmware",
+        help="Stage a firmware .bin in /firmware on the card (the reader offers the update itself)",
+    )
     put_firmware.add_argument("path")
     add_upload_common(put_firmware, firmware=True)
 
@@ -641,7 +647,11 @@ def main() -> int:
     if args.command == "put-bmp":
         return asyncio.run(put_file(args, kind="bmp", suffix=".bmp", success_states={"saved"}))
     if args.command == "put-firmware":
-        return asyncio.run(put_file(args, kind="firmware", suffix=".bin", success_states={"restarting"}))
+        # "saved", not "restarting". A firmware push no longer flashes anything
+        # during the session: it drops the image and its checksum into /firmware
+        # and ends there. The reader re-hashes it off the card on its own clock
+        # and asks the user. See docs/ble-transfer-protocol.md#firmware-updates.
+        return asyncio.run(put_file(args, kind="firmware", suffix=".bin", success_states={"saved"}))
     if args.command == "get-crash-report":
         return asyncio.run(get_crash_report(args))
     return 2

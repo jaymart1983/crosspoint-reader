@@ -14,8 +14,12 @@
  *  4) On confirm: stream the file into the OTA partition via the Arduino Update API,
  *     drawing a progress bar; on success ESP.restart().
  *
- * Used both from Settings -> System -> "SD Card Firmware Update", and as the only
- * activity launched in boot recovery mode (left side button + power on X3).
+ * Used from Settings -> System -> "SD Card Firmware Update", as the only activity
+ * launched in boot recovery mode (left side button + power on X3), and -- with a
+ * path already chosen -- for an image FirmwareWatcher found in the drop folder.
+ * That last route skips step 1 only: the validation, the confirmation and the
+ * flash are the same code, because the point of the drop folder was to remove a
+ * second flashing path, not to add one.
  */
 class SdFirmwareUpdateActivity : public Activity {
  public:
@@ -31,6 +35,16 @@ class SdFirmwareUpdateActivity : public Activity {
   explicit SdFirmwareUpdateActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool recoveryMode = false)
       : Activity("SdFirmwareUpdate", renderer, mappedInput), recoveryMode(recoveryMode) {}
 
+  // Pre-chosen image: no picker, straight to validate-and-confirm. `stagedDrop`
+  // says the file came out of the watched folder, which is the only case that
+  // clears the folder afterwards -- an image the user picked by hand out of their
+  // own directory is theirs, and deleting it would be a surprise.
+  SdFirmwareUpdateActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path, bool stagedDrop)
+      : Activity("SdFirmwareUpdate", renderer, mappedInput),
+        firmwarePath(std::move(path)),
+        presetPath(true),
+        stagedDrop(stagedDrop) {}
+
   void onEnter() override;
   void loop() override;
   void render(RenderLock&&) override;
@@ -42,6 +56,11 @@ class SdFirmwareUpdateActivity : public Activity {
   bool recoveryMode = false;
 
   std::string firmwarePath;
+  // The image was named by the caller rather than picked on screen, so a
+  // cancelled confirmation leaves the screen instead of reopening a picker that
+  // was never opened.
+  bool presetPath = false;
+  bool stagedDrop = false;
   size_t firmwareSize = 0;
   size_t writtenBytes = 0;
   unsigned int lastRenderedPercent = 101;

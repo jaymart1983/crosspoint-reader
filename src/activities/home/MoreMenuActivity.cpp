@@ -25,7 +25,13 @@ void MoreMenuActivity::onEnter() {
   // Same rule the home screen used to apply: no configured OPDS server, no row.
   if (OPDS_STORE.hasServers()) rows.push_back(MoreRow::OPDS);
 #endif
+#if FREEINK_CAP_NETWORK
+  // WiFi file transfer (web server / Calibre / hotspot). There is no such row on
+  // a network-less board any more: USB Drive mounts itself when a cable is
+  // plugged in and Bluetooth is always on, so a menu that offered to "start" a
+  // transport had nothing left to start.
   rows.push_back(MoreRow::TRANSFER);
+#endif
   rows.push_back(MoreRow::PREFERENCES);
 
   rowItems.clear();
@@ -90,7 +96,9 @@ void MoreMenuActivity::activateIndex(const int index) {
 #endif
       break;
     case MoreRow::TRANSFER:
+#if FREEINK_CAP_NETWORK
       activityManager.goToFileTransfer();
+#endif
       break;
     case MoreRow::PREFERENCES:
       activityManager.goToSettings();

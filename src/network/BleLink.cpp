@@ -1,11 +1,11 @@
-#include "BleTransferActivity.h"
+#include "BleLink.h"
+
+#if FREEINK_CAP_BLE_TRANSFER
 
 #include <ArduinoJson.h>
-#include <GfxRenderer.h>
-#include <I18n.h>
+#include <HalClock.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <HalClock.h>
 #include <NimBLEDevice.h>
 #include <esp_mac.h>
 #include <esp_ota_ops.h>
@@ -25,15 +25,14 @@
 #include <utility>
 
 #include "BleTrustedHostStore.h"
-#include "MappedInputManager.h"
-#include "components/UITheme.h"
-#include "fontIds.h"
-#include "network/FirmwareFlasher.h"
+#include "FirmwareFlasher.h"
+#include "FirmwareStaging.h"
+#include "activities/Activity.h"  // pulls ActivityManager.h with Activity complete
+#include "activities/network/BleStoreController.h"
 #include "util/BleCatalog.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookLibraryIndex.h"
 #include "util/BookProgressSync.h"
-#include "util/QrUtils.h"
 #include "util/TaskWatchdog.h"
 
 namespace {
@@ -47,9 +46,6 @@ constexpr const char* BLE_DATA_OUT_UUID = "6f9f0a04-9b1d-4d1f-9f53-5b6b8b3d0f10"
 constexpr const char* BLE_TRANSFER_WEB_URL = "https://ble.xteink.lol/";
 constexpr const char* BOOKS_ROOT = "/Books";
 constexpr const char* PICTURES_ROOT = "/Pictures";
-constexpr const char* BLE_OTA_ROOT = "/.crosspoint/ble-ota";
-constexpr const char* BLE_OTA_PART_PATH = "/.crosspoint/ble-ota/firmware.bin.part";
-constexpr const char* BLE_OTA_FINAL_PATH = "/.crosspoint/ble-ota/firmware.bin";
 constexpr const char* CRASH_REPORT_PATH = "/crash_report.txt";
 constexpr const char* CRASH_REPORT_NAME = "crash_report.txt";
 // The library listing is staged on SD rather than held in RAM, then served
@@ -72,7 +68,7 @@ constexpr const char* PROGRESS_RESULT_NAME = "progress-result.json";
 // A catalogue page or book detail is staged exactly like every other upload --
 // part file, SHA-256 over the whole thing, rename on commit -- and only then
 // unpacked. The store's own scratch lives under /.crosspoint/store so closing
-// the screen can clear the whole lot in one place.
+// the Store screen can clear the whole lot in one place.
 constexpr const char* STORE_ROOT = "/.crosspoint/store";
 constexpr const char* CATALOG_PART_PATH = "/.crosspoint/store/catalog.bin.part";
 constexpr const char* CATALOG_PATH = "/.crosspoint/store/catalog.bin";
@@ -109,7 +105,6 @@ constexpr size_t MAX_QUEUED_BLE_EVENT_BYTES = 8UL * 1024UL;
 constexpr size_t EPUB_SUFFIX_LEN = 5;
 constexpr size_t BMP_SUFFIX_LEN = 4;
 constexpr size_t BIN_SUFFIX_LEN = 4;
-constexpr int BLE_TRANSFER_QR_SIZE = 172;
 // A GATT notification carries at most ATT_MTU-3 bytes, and the peer decides the
 // MTU. Until it has exchanged one the only defensible assumption is the 23-byte
 // BLE minimum -- 20 bytes of payload.
@@ -123,6 +118,16 @@ constexpr size_t BLE_ATT_NOTIFY_OVERHEAD = 3;
 // back and logged. 185 is the floor because it is what iOS settles on; below
 // that there is nothing to gain over the default.
 constexpr uint16_t BLE_ATT_MTU_PREFERENCES[] = {517, 256, 185};
+// The advertising interval, in NimBLE's 0.625 ms units. The radio is now up for
+// as long as the device is awake rather than for as long as one screen is open,
+// so the interval is what decides what that costs. A reader is not a mouse: the
+// phone syncs a shelf every few days, and nobody is waiting on a 30 ms
+// reconnect. At ~1 s between events the radio is on for roughly 2 ms in every
+// 1000 -- a 0.2% duty cycle -- and a scanning phone still finds the reader
+// inside its first second or two of looking. Dropping to 30 ms would buy latency
+// nothing here wants and cost ~30x the advertising energy.
+constexpr uint16_t BLE_ADV_INTERVAL_MIN_UNITS = 1600;  // 1000 ms
+constexpr uint16_t BLE_ADV_INTERVAL_MAX_UNITS = 2056;  // 1285 ms
 // How long teardown will wait for the NimBLE host task, in 5 ms steps. Half a
 // second is far longer than a clean stop needs and still bounded.
 constexpr int BLE_TEARDOWN_WAIT_STEPS = 100;
@@ -367,27 +372,27 @@ class ProgressBatchReader {
   bool firstEntry_ = true;
 };
 
-std::string transferKindName(const BleTransferActivity::TransferKind kind) {
+std::string transferKindName(const BleLink::TransferKind kind) {
   switch (kind) {
-    case BleTransferActivity::TransferKind::BOOK:
+    case BleLink::TransferKind::BOOK:
       return "book";
-    case BleTransferActivity::TransferKind::BMP:
+    case BleLink::TransferKind::BMP:
       return "bmp";
-    case BleTransferActivity::TransferKind::FIRMWARE:
+    case BleLink::TransferKind::FIRMWARE:
       return "firmware";
-    case BleTransferActivity::TransferKind::PROGRESS:
+    case BleLink::TransferKind::PROGRESS:
       return "progress";
-    case BleTransferActivity::TransferKind::PROGRESS_RESULT:
+    case BleLink::TransferKind::PROGRESS_RESULT:
       return "progress_result";
-    case BleTransferActivity::TransferKind::CRASH_REPORT:
+    case BleLink::TransferKind::CRASH_REPORT:
       return "crash_report";
-    case BleTransferActivity::TransferKind::LIBRARY:
+    case BleLink::TransferKind::LIBRARY:
       return "library";
-    case BleTransferActivity::TransferKind::CATALOG_PAGE:
+    case BleLink::TransferKind::CATALOG_PAGE:
       return "catalog_page";
-    case BleTransferActivity::TransferKind::CATALOG_DETAIL:
+    case BleLink::TransferKind::CATALOG_DETAIL:
       return "catalog_detail";
-    case BleTransferActivity::TransferKind::NONE:
+    case BleLink::TransferKind::NONE:
       return "";
   }
   return "";
@@ -409,37 +414,27 @@ std::string hmacSha256Hex(const std::string& secret, const std::string& message)
   return bytesToHex(output, sizeof(output));
 }
 
-std::string stateName(BleTransferActivity::State state) {
+std::string stateName(BleLink::State state) {
   switch (state) {
-    case BleTransferActivity::State::STARTING:
+    case BleLink::State::STARTING:
       return "starting";
-    case BleTransferActivity::State::ADVERTISING:
+    case BleLink::State::ADVERTISING:
       return "advertising";
-    case BleTransferActivity::State::CONNECTED:
+    case BleLink::State::CONNECTED:
       return "connected";
-    case BleTransferActivity::State::RECEIVING:
+    case BleLink::State::RECEIVING:
       return "receiving";
-    case BleTransferActivity::State::VERIFYING:
+    case BleLink::State::VERIFYING:
       return "verifying";
-    case BleTransferActivity::State::SAVED:
+    case BleLink::State::SAVED:
       return "saved";
-    case BleTransferActivity::State::FIRMWARE_CONFIRM:
-      return "confirming";
-    case BleTransferActivity::State::UPDATING:
-      return "updating";
-    case BleTransferActivity::State::RESTARTING:
-      return "restarting";
-    case BleTransferActivity::State::PREPARING:
+    case BleLink::State::PREPARING:
       return "preparing";
-    case BleTransferActivity::State::SENDING:
+    case BleLink::State::SENDING:
       return "sending";
-    case BleTransferActivity::State::SENT:
+    case BleLink::State::SENT:
       return "sent";
-    case BleTransferActivity::State::SAVE_HOST_PROMPT:
-      return "save_host_prompt";
-    case BleTransferActivity::State::FORGET_HOST_PROMPT:
-      return "forget_host_prompt";
-    case BleTransferActivity::State::ERROR:
+    case BleLink::State::ERROR:
       return "error";
   }
   return "unknown";
@@ -483,7 +478,7 @@ bool hashExistingPrefix(const std::string& path, size_t bytes, mbedtls_sha256_co
 
 class ServerCallbacks final : public NimBLEServerCallbacks {
  public:
-  explicit ServerCallbacks(BleTransferActivity& activity) : activity_(activity) {}
+  explicit ServerCallbacks(BleLink& link) : link_(link) {}
 
   void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
     server->updateConnParams(connInfo.getConnHandle(), 6, 12, 0, 120);
@@ -491,52 +486,52 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
     // Still the 23-byte default at this point on most stacks; onMTUChange
     // corrects it a moment later. Recorded either way so a peer that never
     // exchanges is sized for honestly rather than optimistically.
-    activity_.noteBleMtu(connInfo.getMTU());
-    activity_.enqueueBleConnected();
+    link_.noteBleMtu(connInfo.getMTU());
+    link_.enqueueBleConnected();
   }
 
-  void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override { activity_.noteBleMtu(mtu); }
+  void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override { link_.noteBleMtu(mtu); }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
-    activity_.noteBleMtu(0);
-    activity_.enqueueBleDisconnected();
+    link_.noteBleMtu(0);
+    link_.enqueueBleDisconnected();
   }
 
  private:
-  BleTransferActivity& activity_;
+  BleLink& link_;
 };
 
 class ControlCallbacks final : public NimBLECharacteristicCallbacks {
  public:
-  explicit ControlCallbacks(BleTransferActivity& activity) : activity_(activity) {}
+  explicit ControlCallbacks(BleLink& link) : link_(link) {}
 
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
-    activity_.enqueueControlWrite(characteristic->getValue());
+    link_.enqueueControlWrite(characteristic->getValue());
   }
 
  private:
-  BleTransferActivity& activity_;
+  BleLink& link_;
 };
 
 class DataCallbacks final : public NimBLECharacteristicCallbacks {
  public:
-  explicit DataCallbacks(BleTransferActivity& activity) : activity_(activity) {}
+  explicit DataCallbacks(BleLink& link) : link_(link) {}
 
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
-    activity_.enqueueDataWrite(characteristic->getValue());
+    link_.enqueueDataWrite(characteristic->getValue());
   }
 
  private:
-  BleTransferActivity& activity_;
+  BleLink& link_;
 };
 
 }  // namespace
 
-struct BleTransferRuntime {
-  explicit BleTransferRuntime(BleTransferActivity& owner)
-      : activity(owner), serverCallbacks(owner), controlCallbacks(owner), dataCallbacks(owner) {}
+struct BleLinkRuntime {
+  explicit BleLinkRuntime(BleLink& owner)
+      : link(owner), serverCallbacks(owner), controlCallbacks(owner), dataCallbacks(owner) {}
 
-  BleTransferActivity& activity;
+  BleLink& link;
   NimBLEServer* server = nullptr;
   NimBLEService* service = nullptr;
   NimBLECharacteristic* control = nullptr;
@@ -578,11 +573,13 @@ struct BleTransferRuntime {
     // The stored value is the authoritative document from the first moment: a
     // client that reads before it ever sees a notification still gets the whole
     // truth.
-    status->setValue(activity.buildStatusJson(BleTransferActivity::StatusScope::READ, STATUS_DETAIL_MAX));
+    status->setValue(link.buildStatusJson(BleLink::StatusScope::READ, STATUS_DETAIL_MAX));
 
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(BLE_SERVICE_UUID);
     advertising->setName(BLE_DEVICE_NAME);
+    advertising->setMinInterval(BLE_ADV_INTERVAL_MIN_UNITS);
+    advertising->setMaxInterval(BLE_ADV_INTERVAL_MAX_UNITS);
     advertising->start();
     return true;
   }
@@ -621,7 +618,7 @@ struct BleTransferRuntime {
     // rather than waiting for the next thing to happen.
     status->setValue(readJson);
 
-    const size_t notifyCap = activity.notifyCapBytes();
+    const size_t notifyCap = link.notifyCapBytes();
     const uint16_t mtu = peerMtu();
     if (!hasPeer()) {
       // A doorbell with nobody at the door. NimBLE would drop it anyway; logging
@@ -646,7 +643,7 @@ struct BleTransferRuntime {
 
   void notifyData(const uint8_t* data, const size_t length) {
     if (!dataOut) return;
-    const size_t notifyCap = activity.notifyCapBytes();
+    const size_t notifyCap = link.notifyCapBytes();
     // The client picks the chunk size and its resume arithmetic depends on it,
     // so this is never silently shrunk -- but a frame the link cannot carry is
     // the same class of bug as an overlong status, and must not be silent.
@@ -663,7 +660,7 @@ struct BleTransferRuntime {
     if (advertising) advertising->start();
   }
 
-  // Teardown runs on the activity's task while the NimBLE host task is still
+  // Teardown runs on the main loop task while the NimBLE host task is still
   // live on the other core, so the order below is the whole point of it.
   //
   // THE CRASH THIS FIXES. NimBLEDevice::deinit() is nimble_port_stop() followed
@@ -677,9 +674,9 @@ struct BleTransferRuntime {
   // So: stop making work, wait for the host to go quiet, and only then deinit.
   void end() {
     if (server) {
-      // Nothing may re-enter this runtime or the activity from the host task
-      // once end() returns: the callback objects are members of this struct and
-      // the activity's event mutex is deleted moments later. Detaching first is
+      // Nothing may re-enter this runtime or the link from the host task once
+      // end() returns: the callback objects are members of this struct and the
+      // link's event queue is torn down moments later. Detaching first is
       // what makes that safe rather than merely likely -- NimBLE swaps in its own
       // do-nothing defaults when handed nullptr.
       server->setCallbacks(nullptr, false);
@@ -717,7 +714,7 @@ struct BleTransferRuntime {
   }
 
   // And wait for the task itself to be gone before this runtime -- and with it
-  // the callback objects and the activity that owns them -- is freed.
+  // the callback objects and the link that owns them -- is freed.
   static void waitForHostTaskGone() {
     for (int step = 0; step < BLE_TEARDOWN_WAIT_STEPS; step++) {
       if (xTaskGetHandle("nimble_host") == nullptr) return;
@@ -728,116 +725,92 @@ struct BleTransferRuntime {
   }
 };
 
-BleTransferActivity::BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const Mode mode)
-    // The name is what ActivityManager::goHome() reads to decide which home row
-    // to land on, so the two modes must not share one.
-    : Activity(mode == Mode::STORE ? "Store" : "BleTransfer", renderer, mappedInput),
-      mode_(mode),
-      eventMutex_(xSemaphoreCreateMutex()) {
-  if (mode_ == Mode::STORE) {
-    store_ = makeUniqueNoThrow<BleStoreController>(renderer, mappedInput, *this);
-    if (!store_) LOG_ERR("BLE", "OOM: store controller");
-  }
+const char* BleLink::companionUrl() { return BLE_TRANSFER_WEB_URL; }
+
+BleLink& BleLink::getInstance() {
+  static BleLink instance;
+  return instance;
 }
 
-BleTransferActivity::~BleTransferActivity() {
-  if (eventMutex_) {
-    vSemaphoreDelete(eventMutex_);
-    eventMutex_ = nullptr;
-  }
-}
+void BleLink::begin() {
+  if (ble_) return;
 
-void BleTransferActivity::onEnter() {
-  Activity::onEnter();
+  if (!eventMutex_) {
+    eventMutex_ = xSemaphoreCreateMutex();
+    if (!eventMutex_) {
+      LOG_ERR("BLE", "could not create the BLE event mutex; the link stays down");
+      return;
+    }
+  }
+
+  // The code is regenerated once per wake, not once per screen. A user copying
+  // six digits off the pairing page must not have them change underneath them
+  // because they walked back to the home screen on the way to their phone.
   sessionCode_ = makeSessionCode();
   deviceId_ = makeDeviceId();
   deviceNonce_ = makeNonceHex();
-  {
-    RenderLock lock(*this);
-    BLE_TRUSTED_HOSTS.loadFromFile();
-  }
+  BLE_TRUSTED_HOSTS.loadFromFile();
   mbedtls_sha256_init(&shaContext_);
-  if (store_) store_->begin();
-  setState(State::STARTING);
+  state_ = State::STARTING;
+  errorMessage_.clear();
+  authErrorMessage_.clear();
 
-  ble_ = std::make_unique<BleTransferRuntime>(*this);
+  ble_ = makeUniqueNoThrow<BleLinkRuntime>(*this);
+  if (!ble_) {
+    LOG_ERR("BLE", "OOM: BLE runtime");
+    setError("Could not start BLE");
+    return;
+  }
   if (!ble_->begin()) {
+    ble_.reset();
     setError("Could not start BLE");
     return;
   }
 
+  LOG_INF("BLE", "advertising as '%s' (paired: %s)", BLE_DEVICE_NAME, BLE_TRUSTED_HOSTS.hasHosts() ? "yes" : "no");
   setState(State::ADVERTISING);
   publishStatus();
 }
 
-void BleTransferActivity::onExit() {
-  Activity::onExit();
+void BleLink::end() {
+  if (!ble_) return;
   // Close the files first, then take the radio down, and only then clear the
-  // card. The order matters: clearing the Store's thumbnails and the staged
-  // scratch documents is a second or so of SD work, and it used to happen with
-  // the server still advertising and its callbacks still pointing at an activity
-  // that was on its way out. Nothing may arrive over the air after this point.
+  // card. The order matters: clearing the staged scratch documents is a second
+  // or so of SD work, and it must not happen with the server still advertising
+  // and its callbacks still pointing at state on its way out. Nothing may arrive
+  // over the air after this point.
   resetTransfer(true);
-  if (ble_) {
-    ble_->end();
-    ble_.reset();
-  }
-  // The staged library listing, the uploaded progress batch and its result
-  // document are scratch files for one session only.
-  if (store_) store_->end();
+  ble_->end();
+  ble_.reset();
+  // Scratch for one wake only. The Store's own thumbnails are cleared by the
+  // Store screen; these are the link's.
   if (Storage.exists(CATALOG_PATH)) Storage.remove(CATALOG_PATH);
   if (Storage.exists(CATALOG_PART_PATH)) Storage.remove(CATALOG_PART_PATH);
   if (Storage.exists(LIBRARY_INDEX_PATH)) Storage.remove(LIBRARY_INDEX_PATH);
   if (Storage.exists(PROGRESS_BATCH_PATH)) Storage.remove(PROGRESS_BATCH_PATH);
   if (Storage.exists(PROGRESS_RESULT_PATH)) Storage.remove(PROGRESS_RESULT_PATH);
   mbedtls_sha256_free(&shaContext_);
+  helloAccepted_ = false;
+  trustedHelloAccepted_ = false;
+  trustedHostName_.clear();
+  state_ = State::STARTING;
+  LOG_INF("BLE", "link stopped");
 }
 
-void BleTransferActivity::loop() {
+void BleLink::tick() {
+  if (!ble_) return;
+
   processBleEvents();
 
-  // The pairing prompts belong to the session, not to either face of it, so they
-  // are handled before the store gets a look at the frame.
-  if (store_ && state_ != State::SAVE_HOST_PROMPT && state_ != State::FORGET_HOST_PROMPT) {
-    if (pendingCommit_) {
-      pendingCommit_ = false;
-      processCommit();
-      return;
-    }
-    store_->tick();
-    if (store_->handleInput()) return;
-    if (statusDirty_) publishStatus();
-    return;
-  }
-
-  if (state_ == State::FIRMWARE_CONFIRM) {
-    handleFirmwareConfirm();
-    return;
-  }
-  if (state_ == State::SAVE_HOST_PROMPT) {
-    handleSaveHostPrompt();
-    return;
-  }
-  if (state_ == State::FORGET_HOST_PROMPT) {
-    handleForgetHostPrompt();
-    return;
-  }
-
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    finish();
-    return;
-  }
-  if (mappedInput.wasPressed(MappedInputManager::Button::Left) && BLE_TRUSTED_HOSTS.hasHosts() &&
-      (state_ == State::ADVERTISING || state_ == State::CONNECTED)) {
-    promptSelection_ = 0;
-    setState(State::FORGET_HOST_PROMPT);
-    return;
-  }
   if (pendingCommit_) {
     pendingCommit_ = false;
     processCommit();
     return;
   }
+  // Only the Store has work of its own to do on a tick -- deadlines, republishes
+  // of an outstanding request. Its input is handled by its own activity, which
+  // is the thing that has a screen.
+  if (store_) store_->tick();
   if (state_ == State::SENDING && downloadOpen_) {
     if (statusDirty_) publishStatus();
     pumpDownload();
@@ -846,7 +819,58 @@ void BleTransferActivity::loop() {
   if (statusDirty_) publishStatus();
 }
 
-void BleTransferActivity::enqueueBleEvent(BleEvent event) {
+void BleLink::attachStore(BleStoreController* store) {
+  store_ = store;
+  storeExpectedBook_.clear();
+  if (!store_) return;
+  // The Store screen opened onto a link that may already be through the gate --
+  // which is the entire point of the radio outliving the screen. Tell it so,
+  // rather than making it wait for a reconnect that is not coming.
+  if (helloAccepted_) store_->onAppReady();
+}
+
+void BleLink::detachStore(const BleStoreController* store) {
+  if (store_ != store) return;
+  store_ = nullptr;
+  storeExpectedBook_.clear();
+}
+
+void BleLink::notifyObserver() {
+  if (observer_) observer_->onBleLinkChanged();
+}
+
+bool BleLink::hasTrustedHost() const { return BLE_TRUSTED_HOSTS.hasHosts(); }
+
+std::string BleLink::trustedHostLabel() const {
+  const auto& hosts = BLE_TRUSTED_HOSTS.getHosts();
+  if (hosts.empty()) return {};
+  return hosts.front().name.empty() ? hosts.front().hostId : hosts.front().name;
+}
+
+bool BleLink::forgetTrustedHost() {
+  if (!BLE_TRUSTED_HOSTS.clearAll()) return false;
+  // Whatever was on the link authenticated as a host that no longer exists. Shut
+  // the gate so the next hello has to come through the code again.
+  helloAccepted_ = false;
+  trustedHelloAccepted_ = false;
+  trustedHostName_.clear();
+  hostPaired_ = false;
+  authErrorMessage_.clear();
+  deviceNonce_ = makeNonceHex();
+  setState(isPeerConnected() ? State::CONNECTED : State::ADVERTISING);
+  publishStatus();
+  return true;
+}
+
+bool BleLink::isPeerConnected() const { return ble_ && ble_->hasPeer(); }
+
+void BleLink::publishStatusNow() {
+  statusDirty_ = true;
+  publishStatus();
+  notifyObserver();
+}
+
+void BleLink::enqueueBleEvent(BleEvent event) {
   if (!eventMutex_) return;
   const size_t eventBytes = event.value.size();
   xSemaphoreTake(eventMutex_, portMAX_DELAY);
@@ -862,17 +886,17 @@ void BleTransferActivity::enqueueBleEvent(BleEvent event) {
   xSemaphoreGive(eventMutex_);
 }
 
-void BleTransferActivity::enqueueBleConnected() { enqueueBleEvent({BleEventType::CONNECTED, {}}); }
+void BleLink::enqueueBleConnected() { enqueueBleEvent({BleEventType::CONNECTED, {}}); }
 
-void BleTransferActivity::enqueueBleDisconnected() { enqueueBleEvent({BleEventType::DISCONNECTED, {}}); }
+void BleLink::enqueueBleDisconnected() { enqueueBleEvent({BleEventType::DISCONNECTED, {}}); }
 
-void BleTransferActivity::enqueueControlWrite(const std::string& value) {
+void BleLink::enqueueControlWrite(const std::string& value) {
   enqueueBleEvent({BleEventType::CONTROL, value});
 }
 
-void BleTransferActivity::enqueueDataWrite(const std::string& value) { enqueueBleEvent({BleEventType::DATA, value}); }
+void BleLink::enqueueDataWrite(const std::string& value) { enqueueBleEvent({BleEventType::DATA, value}); }
 
-void BleTransferActivity::processBleEvents() {
+void BleLink::processBleEvents() {
   while (true) {
     BleEvent event;
     bool hasEvent = false;
@@ -917,16 +941,14 @@ void BleTransferActivity::processBleEvents() {
   }
 }
 
-void BleTransferActivity::onBleConnected() {
+void BleLink::onBleConnected() {
   helloAccepted_ = false;
   trustedHelloAccepted_ = false;
   trustedHostName_.clear();
   setState(State::CONNECTED);
 }
 
-void BleTransferActivity::onBleDisconnected() {
-  if (state_ == State::UPDATING || state_ == State::RESTARTING) return;
-
+void BleLink::onBleDisconnected() {
   // The Store is live or it is nothing: with the link gone there is no
   // catalogue to show, so it drops what it had rather than leaving a page on
   // screen that no longer describes anything reachable.
@@ -947,11 +969,6 @@ void BleTransferActivity::onBleDisconnected() {
     setError("client disconnected");
     return;
   }
-  if (transferKind_ == TransferKind::FIRMWARE &&
-      (state_ == State::FIRMWARE_CONFIRM ||
-       (state_ == State::SAVE_HOST_PROMPT && pendingFinalState_ == State::FIRMWARE_CONFIRM))) {
-    resetTransfer(true);
-  }
   helloAccepted_ = false;
   trustedHelloAccepted_ = false;
   trustedHostName_.clear();
@@ -960,9 +977,7 @@ void BleTransferActivity::onBleDisconnected() {
   if (ble_) ble_->startAdvertising();
 }
 
-void BleTransferActivity::onControlWrite(const std::string& value) {
-  if (state_ == State::UPDATING || state_ == State::RESTARTING) return;
-
+void BleLink::onControlWrite(const std::string& value) {
   JsonDocument doc;
   const DeserializationError parseError = deserializeJson(doc, value.data(), value.size());
   if (parseError) {
@@ -983,23 +998,25 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
 
     if (!hostId.empty() && !response.empty()) {
       if (!isSafeHostId(hostId) || !isHexString(response, 64)) {
-        setError("invalid trusted host auth");
+        setAuthError("invalid trusted host auth");
         return;
       }
       const BleTrustedHost* host = BLE_TRUSTED_HOSTS.findHost(hostId);
       if (!host) {
-        setError("unknown trusted host");
+        setAuthError("unknown trusted host");
         return;
       }
       const std::string expected = hmacSha256Hex(host->secret, trustedHostMessage(deviceNonce_, hostId));
       if (expected.empty() || !constantTimeEquals(expected, response)) {
-        setError("invalid trusted host auth");
+        setAuthError("invalid trusted host auth");
         return;
       }
       helloAccepted_ = true;
       trustedHelloAccepted_ = true;
       trustedHostName_ = host->name.empty() ? hostId : host->name;
+      authErrorMessage_.clear();
       deviceNonce_ = makeNonceHex();
+      LOG_INF("BLE", "trusted host '%s' accepted", trustedHostName_.c_str());
       setState(State::CONNECTED);
       // The gate is the only thing the Store was waiting for: ask for page one.
       if (store_) store_->onAppReady();
@@ -1007,28 +1024,40 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     }
 
     if (code != sessionCode_) {
-      setError("invalid session code");
+      setAuthError("invalid session code");
       return;
     }
-    if (!setPendingTrustedHost(doc["pair_host_id"] | "", doc["pair_host_name"] | "",
-                               toLowerAscii(doc["pair_secret"] | ""))) {
-      setError("invalid trusted host setup");
-      return;
+    // The six digits were right. If the client offered a credential, it is saved
+    // NOW -- see saveTrustedHost(). A client that offers none simply gets a
+    // code-only session, which is what the CLI and the browser companion do.
+    const std::string pairHostId = doc["pair_host_id"] | "";
+    const std::string pairSecret = toLowerAscii(doc["pair_secret"] | "");
+    if (!pairHostId.empty() || !pairSecret.empty()) {
+      if (!saveTrustedHost(pairHostId, doc["pair_host_name"] | "", pairSecret)) {
+        setAuthError("invalid trusted host setup");
+        return;
+      }
     }
     helloAccepted_ = true;
     trustedHelloAccepted_ = false;
+    authErrorMessage_.clear();
     setState(State::CONNECTED);
     if (store_) store_->onAppReady();
     return;
   }
 
   if (!helloAccepted_) {
-    setError("session code required");
+    setAuthError("session code required");
     return;
   }
 
   if (op == "save_host") {
-    setError("save_host requires completed upload");
+    // Kept so an older client's explicit save does not read as a protocol error,
+    // but it has nothing left to do: a credential offered with the right code was
+    // written to flash the moment it arrived. The answer is the status document,
+    // where `paired` already says so.
+    statusDirty_ = true;
+    publishStatus();
     return;
   }
 
@@ -1071,7 +1100,7 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     // No state change: the acknowledgement is `device_time` in the status the
     // client is already subscribed to, which is also how it detects drift.
     statusDirty_ = true;
-    requestUpdate();
+    notifyObserver();
     return;
   }
 
@@ -1158,6 +1187,20 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
         return;
       }
     } else if (kind == "progress") {
+      // NOT while a book is open. This used to be guaranteed by the architecture:
+      // the transfer screen was reached through replaceActivity(), which tore the
+      // reader down -- final position written to disk -- before the radio ever
+      // came up. The radio outliving the screen removes that guarantee, and a
+      // batch applied underneath a live reader would be silently overwritten by
+      // that reader's own position when it exits, which is worse than not syncing
+      // at all because the phone would have been told it succeeded.
+      //
+      // Refused rather than deferred: the app knows how to retry, and a queue of
+      // pending shelf writes is a far larger thing to get right than a retry.
+      if (activityManager.isReaderActivity()) {
+        setError("book open");
+        return;
+      }
       // The batch has no user-facing name and never lands on the shelf: it is
       // staged at a fixed scratch path, parsed on commit, and deleted.
       if (expectedSize_ == 0 || expectedSize_ > MAX_BLE_PROGRESS_BYTES) {
@@ -1214,13 +1257,20 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
         setError("invalid firmware size");
         return;
       }
-      if (!Storage.ensureDirectoryExists(BLE_OTA_ROOT)) {
-        setError("could not create ota directory");
+      if (!Storage.ensureDirectoryExists(firmware_staging::DIR)) {
+        setError("could not create the firmware directory");
         return;
       }
+      // Straight into the watched folder under its one fixed name. The client
+      // may call the file whatever it likes -- isSafeBleFirmwareName() still has
+      // to pass, and the name is echoed back in `status` -- but what lands on the
+      // card is /firmware/firmware.bin, because that is the only path the
+      // watcher, the app and a human with the card in a laptop all agree on.
       transferKind_ = TransferKind::FIRMWARE;
-      partPath_ = BLE_OTA_PART_PATH;
-      finalPath_ = BLE_OTA_FINAL_PATH;
+      partPath_ = firmware_staging::PART_PATH;
+      finalPath_ = firmware_staging::IMAGE_PATH;
+      // A previous drop must not be what gets flashed if this one fails halfway.
+      firmware_staging::clearStaged();
     } else {
       setError("unsupported transfer kind");
       return;
@@ -1320,7 +1370,7 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     }
     downloadAwaitingAck_ = false;
     statusDirty_ = true;
-    requestUpdate();
+    notifyObserver();
     return;
   }
 
@@ -1343,7 +1393,7 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
   setError("unknown control op");
 }
 
-void BleTransferActivity::onDataWrite(const std::string& value) {
+void BleLink::onDataWrite(const std::string& value) {
   if (!transferOpen_ || state_ != State::RECEIVING) return;
   if (value.size() <= sizeof(uint32_t)) {
     setError("invalid data frame");
@@ -1385,11 +1435,11 @@ void BleTransferActivity::onDataWrite(const std::string& value) {
     // The store paints its own progress bar, on the same cadence the transfer
     // screen repaints on.
     if (store_ && transferKind_ == TransferKind::BOOK) store_->onFetchProgress(receivedBytes_, expectedSize_);
-    requestUpdate();
+    notifyObserver();
   }
 }
 
-void BleTransferActivity::processCommit() {
+void BleLink::processCommit() {
   if (!transferOpen_) return;
   setState(State::VERIFYING);
 
@@ -1447,13 +1497,11 @@ void BleTransferActivity::processCommit() {
   if (transferKind_ == TransferKind::BOOK || transferKind_ == TransferKind::BMP) {
     savedPath_ = finalPath_;
     if (transferKind_ == TransferKind::BOOK) clearBookCache(savedPath_);
-    // Told before completeFinalState(): that may stop on the save-host prompt,
-    // and the book is on the card either way.
     if (store_ && transferKind_ == TransferKind::BOOK) {
       storeExpectedBook_.clear();
       store_->onFetchSaved(savedPath_);
     }
-    completeFinalState(State::SAVED);
+    setState(State::SAVED);
     return;
   }
 
@@ -1464,6 +1512,18 @@ void BleTransferActivity::processCommit() {
     return;
   }
 
+  // Firmware. A BLE push no longer flashes anything: it drops the image into the
+  // watched folder and writes the companion hash beside it, exactly as a person
+  // with the card mounted over USB would. FirmwareWatcher finds it, re-hashes it
+  // off the card, and asks the user. So the radio's job ends here, and an
+  // interactive flash can never be something that happens to a reader because a
+  // phone came into range.
+  //
+  // Validating now anyway is worth the second or two: it lets the app hear
+  // "invalid firmware: BAD_CHIP" while it is still connected and can say so,
+  // instead of the image sitting on the card being silently declined later.
+  // The watcher validates again before it flashes -- the SD card is removable
+  // and that gap is real, so neither check is redundant.
   const esp_partition_t* dest = esp_ota_get_next_update_partition(nullptr);
   if (!dest) {
     setError("no update partition");
@@ -1472,17 +1532,24 @@ void BleTransferActivity::processCommit() {
   LOG_INF("BLE", "validating staged firmware: %s (%u bytes)", finalPath_.c_str(), static_cast<unsigned>(expectedSize_));
   const firmware_flash::Result validateRes = firmware_flash::validateImageFile(finalPath_.c_str(), dest->size);
   if (validateRes != firmware_flash::Result::OK) {
-    Storage.remove(finalPath_.c_str());
+    firmware_staging::clearStaged();
     setError(std::string("invalid firmware: ") + firmware_flash::resultName(validateRes));
     return;
   }
-  flashWrittenBytes_ = 0;
-  promptSelection_ = 0;
-  completeFinalState(State::FIRMWARE_CONFIRM);
-  requestUpdateAndWait();
+  // expectedSha256_ is the digest this transfer just verified the bytes against,
+  // so the companion file can be written from it rather than asking the app to
+  // send the same number twice.
+  if (!firmware_staging::writeExpectedHash(expectedSha256_)) {
+    firmware_staging::clearStaged();
+    setError("could not write the firmware hash file");
+    return;
+  }
+  LOG_INF("BLE", "firmware staged at %s; the update prompt is the watcher's", firmware_staging::IMAGE_PATH);
+  savedPath_ = finalPath_;
+  setState(State::SAVED);
 }
 
-void BleTransferActivity::startFileDownload(const char* path, const char* name, const TransferKind kind,
+void BleLink::startFileDownload(const char* path, const char* name, const TransferKind kind,
                                             const size_t offset, const size_t chunkSize) {
   if (!Storage.exists(path)) {
     setError("not_found");
@@ -1521,11 +1588,11 @@ void BleTransferActivity::startFileDownload(const char* path, const char* name, 
   setState(State::SENDING);
 }
 
-void BleTransferActivity::startCrashReportDownload(const size_t offset, const size_t chunkSize) {
+void BleLink::startCrashReportDownload(const size_t offset, const size_t chunkSize) {
   startFileDownload(CRASH_REPORT_PATH, CRASH_REPORT_NAME, TransferKind::CRASH_REPORT, offset, chunkSize);
 }
 
-void BleTransferActivity::startLibraryDownload(const size_t offset, const size_t chunkSize) {
+void BleLink::startLibraryDownload(const size_t offset, const size_t chunkSize) {
   // Offset 0 means a fresh listing, so rebuild it: a client must never resume
   // onto a document that changed underneath it. A non-zero offset can only refer
   // to the file staged by that same start_get.
@@ -1534,7 +1601,7 @@ void BleTransferActivity::startLibraryDownload(const size_t offset, const size_t
     // book -- so say so on screen and over BLE before blocking on it.
     setState(State::PREPARING);
     publishStatus();
-    requestUpdateAndWait();
+    notifyObserver();
 
     BookLibraryIndex::Stats stats;
     if (!BookLibraryIndex::build(BOOKS_ROOT, LIBRARY_INDEX_PATH, &stats)) {
@@ -1549,22 +1616,19 @@ void BleTransferActivity::startLibraryDownload(const size_t offset, const size_t
   startFileDownload(LIBRARY_INDEX_PATH, LIBRARY_INDEX_NAME, TransferKind::LIBRARY, offset, chunkSize);
 }
 
-void BleTransferActivity::startProgressResultDownload(const size_t offset, const size_t chunkSize) {
+void BleLink::startProgressResultDownload(const size_t offset, const size_t chunkSize) {
   startFileDownload(PROGRESS_RESULT_PATH, PROGRESS_RESULT_NAME, TransferKind::PROGRESS_RESULT, offset, chunkSize);
 }
 
-void BleTransferActivity::processProgressBatch() {
+void BleLink::processProgressBatch() {
   progressEntries_ = 0;
   progressApplied_ = 0;
 
-  // No open-book hazard to guard against here. Reaching this screen goes through
-  // ActivityManager::goToBluetoothTransfer(), which calls replaceActivity()
-  // (ActivityManager.cpp) -- that drops the current activity AND the whole
-  // stack, so a reader has already run onExit(), written its final progress.bin
-  // and been destroyed before BLE advertising ever starts. There is no
-  // in-memory reader position for these writes to fight, and when the user next
-  // opens the book the reader loads the position from disk, which is what was
-  // just written. Nothing is deferred and nothing is rejected on this account.
+  // The open-book hazard is handled at start_put, not here: a batch is refused
+  // outright while the reader has a book in memory. See the `progress` branch of
+  // onControlWrite(). Anything that reaches this point has no in-memory reader
+  // position to fight, so every write below is the last word on that book until
+  // the user opens it again.
   HalFile in;
   if (!Storage.openFileForRead("BLE", PROGRESS_BATCH_PATH, in)) {
     setError("could not read progress batch");
@@ -1638,8 +1702,8 @@ void BleTransferActivity::processProgressBatch() {
   out.flush();
   out.close();
   in.close();
-  // The uploaded batch is scratch; the result document stays until the transfer
-  // screen closes so the client can fetch it.
+  // The uploaded batch is scratch; the result document stays until the link stops
+  // (deep sleep) so the client can fetch it.
   Storage.remove(PROGRESS_BATCH_PATH);
   removePartOnExit_ = false;
 
@@ -1654,10 +1718,10 @@ void BleTransferActivity::processProgressBatch() {
 
   LOG_INF("BLE", "Progress batch: %u entries, %u applied", static_cast<unsigned>(progressEntries_),
           static_cast<unsigned>(progressApplied_));
-  completeFinalState(State::SAVED);
+  setState(State::SAVED);
 }
 
-void BleTransferActivity::pumpDownload() {
+void BleLink::pumpDownload() {
   if (!downloadOpen_ || downloadAwaitingAck_) return;
 
   std::array<uint8_t, sizeof(uint32_t) + BLE_DOWNLOAD_CHUNK_BYTES> frame = {};
@@ -1688,156 +1752,38 @@ void BleTransferActivity::pumpDownload() {
   if (sentBytes_ == expectedSize_ || sentBytes_ - lastProgressStatusBytes_ >= BLE_PROGRESS_STATUS_INTERVAL_BYTES) {
     lastProgressStatusBytes_ = sentBytes_;
     statusDirty_ = true;
-    requestUpdate();
+    notifyObserver();
   }
 }
 
-bool BleTransferActivity::setPendingTrustedHost(const std::string& hostId, const std::string& hostName,
-                                                const std::string& secret) {
-  candidateHostId_.clear();
-  candidateHostName_.clear();
-  candidateHostSecret_.clear();
-  if (hostId.empty() && secret.empty()) return true;
+bool BleLink::saveTrustedHost(const std::string& hostId, const std::string& hostName,
+                              const std::string& secret) {
+  // Written the instant a code-authenticated hello offers a credential.
+  //
+  // This used to be a prompt that only appeared AFTER a completed upload, which
+  // meant a phone that had already saved its half of the pairing -- every phone,
+  // because the app has no reason to wait -- was holding a credential this
+  // reader had never kept. Its next reconnect authenticated by HMAC against
+  // nothing, was refused as an unknown trusted host, and the only way out was
+  // the six-digit code the old error screen had just replaced. Saving here makes
+  // both sides commit at the same moment, which is the whole fix.
+  //
+  // The user's consent is the six digits. They read them off the reader's own
+  // pairing page and typed them into the phone; there is no second question
+  // worth asking, and asking it is what broke this.
   if (!isSafeHostId(hostId) || !isHexString(secret, BLE_SHARED_SECRET_HEX_BYTES)) return false;
-  candidateHostId_ = hostId;
-  candidateHostName_ = sanitizeHostName(hostName);
-  candidateHostSecret_ = secret;
+  const std::string name = sanitizeHostName(hostName);
+  if (!BLE_TRUSTED_HOSTS.addOrReplaceHost(BleTrustedHost{hostId, name, secret})) {
+    LOG_ERR("BLE", "could not persist the trusted host");
+    return false;
+  }
+  trustedHostName_ = name;
+  hostPaired_ = true;
+  LOG_INF("BLE", "paired with '%s' and saved", name.c_str());
   return true;
 }
 
-void BleTransferActivity::completeFinalState(const State finalState) {
-  hostPaired_ = false;
-  hostPairSkipped_ = false;
-  if (!trustedHelloAccepted_ && !candidateHostId_.empty() && !candidateHostSecret_.empty()) {
-    pendingFinalState_ = finalState;
-    promptSelection_ = 0;
-    setState(State::SAVE_HOST_PROMPT);
-    return;
-  }
-  setState(finalState);
-}
-
-void BleTransferActivity::handleFirmwareConfirm() {
-  if (mappedInput.wasPressed(MappedInputManager::Button::Up) ||
-      mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-    if (promptSelection_ > 0) {
-      promptSelection_--;
-      requestUpdate();
-    }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Down) ||
-             mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-    if (promptSelection_ < 1) {
-      promptSelection_++;
-      requestUpdate();
-    }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    if (promptSelection_ != 0) {
-      Storage.remove(finalPath_.c_str());
-      setError("firmware update rejected");
-      return;
-    }
-
-    flashWrittenBytes_ = 0;
-    lastFirmwareFlashRenderedPercent_ = 101;
-    setState(State::UPDATING);
-    publishStatus();
-    requestUpdateAndWait();
-    const auto progressCb = +[](const size_t written, const size_t total, void* ctx) {
-      auto* self = static_cast<BleTransferActivity*>(ctx);
-      self->flashWrittenBytes_ = written;
-      self->expectedSize_ = total;
-      self->statusDirty_ = true;
-      self->publishStatus();
-      const unsigned int pct = total > 0 ? static_cast<unsigned int>((written * 100) / total) : 0;
-      if (pct != self->lastFirmwareFlashRenderedPercent_) {
-        self->lastFirmwareFlashRenderedPercent_ = pct;
-        self->renderFirmwareUpdating();
-      }
-    };
-    firmware_flash::Result flashRes = firmware_flash::Result::READ_FAIL;
-    {
-      RenderLock lock(*this);
-      flashRes = firmware_flash::flashFromSdPath(finalPath_.c_str(), progressCb, this, true);
-    }
-    if (flashRes != firmware_flash::Result::OK) {
-      Storage.remove(finalPath_.c_str());
-      setError(std::string("firmware update failed: ") + firmware_flash::resultName(flashRes));
-      return;
-    }
-    flashWrittenBytes_ = expectedSize_;
-    setState(State::RESTARTING);
-    publishStatus();
-    delay(750);
-    ESP.restart();
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    Storage.remove(finalPath_.c_str());
-    setError("firmware update rejected");
-  }
-}
-
-void BleTransferActivity::handleSaveHostPrompt() {
-  if (mappedInput.wasPressed(MappedInputManager::Button::Up) ||
-      mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-    if (promptSelection_ > 0) {
-      promptSelection_--;
-      requestUpdate();
-    }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Down) ||
-             mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-    if (promptSelection_ < 1) {
-      promptSelection_++;
-      requestUpdate();
-    }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    if (promptSelection_ == 0) {
-      RenderLock lock(*this);
-      hostPaired_ = BLE_TRUSTED_HOSTS.addOrReplaceHost(
-          BleTrustedHost{candidateHostId_, candidateHostName_, candidateHostSecret_});
-      hostPairSkipped_ = !hostPaired_;
-    } else {
-      hostPairSkipped_ = true;
-    }
-    candidateHostId_.clear();
-    candidateHostName_.clear();
-    candidateHostSecret_.clear();
-    setState(pendingFinalState_);
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    hostPairSkipped_ = true;
-    candidateHostId_.clear();
-    candidateHostName_.clear();
-    candidateHostSecret_.clear();
-    setState(pendingFinalState_);
-  }
-}
-
-void BleTransferActivity::handleForgetHostPrompt() {
-  if (mappedInput.wasPressed(MappedInputManager::Button::Up) ||
-      mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-    if (promptSelection_ > 0) {
-      promptSelection_--;
-      requestUpdate();
-    }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Down) ||
-             mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-    if (promptSelection_ < 1) {
-      promptSelection_++;
-      requestUpdate();
-    }
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-    if (promptSelection_ == 1) {
-      RenderLock lock(*this);
-      if (!BLE_TRUSTED_HOSTS.clearAll()) {
-        setError("could not forget trusted host");
-        return;
-      }
-    }
-    setState(State::ADVERTISING);
-  } else if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-    setState(State::ADVERTISING);
-  }
-}
-
-void BleTransferActivity::resetTransfer(const bool removePart) {
+void BleLink::resetTransfer(const bool removePart) {
   if (shaActive_) {
     mbedtls_sha256_free(&shaContext_);
     mbedtls_sha256_init(&shaContext_);
@@ -1845,10 +1791,6 @@ void BleTransferActivity::resetTransfer(const bool removePart) {
   }
   if (uploadFile_) uploadFile_.close();
   if (downloadFile_) downloadFile_.close();
-  if (removePart && transferKind_ == TransferKind::FIRMWARE && state_ != State::UPDATING &&
-      state_ != State::RESTARTING && !finalPath_.empty() && Storage.exists(finalPath_.c_str())) {
-    Storage.remove(finalPath_.c_str());
-  }
   if (removePart && removePartOnExit_ && !partPath_.empty() && Storage.exists(partPath_.c_str())) {
     Storage.remove(partPath_.c_str());
   }
@@ -1859,11 +1801,9 @@ void BleTransferActivity::resetTransfer(const bool removePart) {
   expectedSha256_.clear();
   savedPath_.clear();
   transferKind_ = TransferKind::NONE;
-  pendingFinalState_ = State::CONNECTED;
   expectedSize_ = 0;
   receivedBytes_ = 0;
   sentBytes_ = 0;
-  flashWrittenBytes_ = 0;
   lastProgressStatusBytes_ = 0;
   lastDisplayProgressBytes_ = 0;
   uploadChunkSize_ = 0;
@@ -1880,42 +1820,48 @@ void BleTransferActivity::resetTransfer(const bool removePart) {
   uploadResumable_ = false;
 }
 
-void BleTransferActivity::setState(const State state) {
+void BleLink::setState(const State state) {
   state_ = state;
   statusDirty_ = true;
-  requestUpdate();
+  notifyObserver();
 }
 
-void BleTransferActivity::setError(const std::string& error) { setError(error, true); }
+void BleLink::setError(const std::string& error) { setError(error, true); }
 
-void BleTransferActivity::setError(const std::string& error, const bool notifyStore) {
+void BleLink::setError(const std::string& error, const bool notifyStore) {
   errorMessage_ = error;
   state_ = State::ERROR;
   statusDirty_ = true;
-  requestUpdate();
+  notifyObserver();
   // A refused answer to a question the device is no longer asking is a normal
   // race, reported to the app in `status` and nowhere else. Everything else the
   // Store user needs to see.
   if (notifyStore && store_) store_->onTransferError(error);
 }
 
-void BleTransferActivity::storePublishStatus() {
+void BleLink::setAuthError(const std::string& error) {
+  authErrorMessage_ = error;
+  // Deliberately not State::ERROR. A refused hello is not a failed session: the
+  // link is up, the code is still valid, and reading that code off the pairing
+  // page is the ONLY way a client whose credential this reader does not have can
+  // recover. The old code put the reason on an error screen that replaced the
+  // code, which is why the deadlock had no exit.
+  //
+  // Whether a host is stored is half of any diagnosis of one of these, so it
+  // goes on the same line as the reason -- this used to print nothing at all.
+  LOG_ERR("BLE", "hello refused: %s (a trusted host is stored: %s)", error.c_str(),
+          BLE_TRUSTED_HOSTS.hasHosts() ? "yes" : "no");
+  helloAccepted_ = false;
+  trustedHelloAccepted_ = false;
+  trustedHostName_.clear();
   statusDirty_ = true;
   publishStatus();
-  requestUpdate();
+  notifyObserver();
 }
 
-void BleTransferActivity::storeRepaint() { requestUpdate(); }
+void BleLink::noteBleMtu(const uint16_t mtu) { negotiatedMtu_.store(mtu, std::memory_order_relaxed); }
 
-void BleTransferActivity::storeArmBookFetch(const std::string& filename) { storeExpectedBook_ = filename; }
-
-void BleTransferActivity::storeFinish() { finish(); }
-
-void BleTransferActivity::storeOpenBook(const std::string& path) { activityManager.goToReader(path); }
-
-void BleTransferActivity::noteBleMtu(const uint16_t mtu) { negotiatedMtu_.store(mtu, std::memory_order_relaxed); }
-
-size_t BleTransferActivity::notifyCapBytes() const {
+size_t BleLink::notifyCapBytes() const {
   // The live link is authoritative; the value onMTUChange() cached is the
   // fallback for the moment between connect and the first exchange; the 23-byte
   // BLE floor is the last resort. Reading the cache first is what used to cap
@@ -1930,7 +1876,7 @@ size_t BleTransferActivity::notifyCapBytes() const {
   return cap < BLE_STATUS_NOTIFY_MAX_BYTES ? cap : BLE_STATUS_NOTIFY_MAX_BYTES;
 }
 
-std::string BleTransferActivity::buildNotifyJson(const size_t capBytes) const {
+std::string BleLink::buildNotifyJson(const size_t capBytes) const {
   for (unsigned detail = STATUS_DETAIL_MAX;; --detail) {
     std::string json = buildStatusJson(StatusScope::NOTIFY, detail);
     if (json.size() <= capBytes) return json;
@@ -1945,13 +1891,13 @@ std::string BleTransferActivity::buildNotifyJson(const size_t capBytes) const {
   return {};
 }
 
-void BleTransferActivity::publishStatus() {
+void BleLink::publishStatus() {
   statusDirty_ = false;
   if (!ble_) return;
   ble_->publish(buildStatusJson(StatusScope::READ, STATUS_DETAIL_MAX), buildNotifyJson(notifyCapBytes()));
 }
 
-std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const unsigned detail) const {
+std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned detail) const {
   JsonDocument doc;
   const std::string state = stateName(state_);
   // The notification is a doorbell, the read is authoritative. A READ carries
@@ -1992,7 +1938,6 @@ std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const 
   // The store is a capability of this firmware, not of this screen: an app can
   // see it is supported while the user is still on the transfer screen.
   if (wantSession) doc["store_supported"] = true;
-  if (mode_ == Mode::STORE && wantIdentity) doc["mode"] = "store";
   if (wantSession) {
     doc["clock_supported"] = halClock.isAvailable();
     // Omitted, never zeroed, when the device does not know the time: the client
@@ -2004,12 +1949,16 @@ std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const 
   if (full) {
     doc["device_id"] = deviceId_.c_str();
     doc["device_nonce"] = deviceNonce_.c_str();
-    doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
   }
   if (wantIdentity) {
+    // Promoted out of the READ-only block: this is the field that separates "you
+    // were never saved here, pair with the code" from "your credential is
+    // wrong", and a client that only listens to the doorbell needs it at exactly
+    // the moment its trusted hello was refused. The reader stores at most one
+    // host, so false means nobody is remembered, full stop.
+    doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
     if (!trustedHostName_.empty()) doc["trusted_host"] = trustedHostName_.c_str();
     if (hostPaired_) doc["paired"] = true;
-    if (hostPairSkipped_) doc["pairing"] = "skipped";
   }
   if (wantProgress && (expectedSize_ > 0 || state_ == State::SENDING || state_ == State::SENT)) {
     const std::string kind = transferKindName(transferKind_);
@@ -2022,9 +1971,6 @@ std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const 
       doc["applied"] = progressApplied_;
     } else if (state_ == State::SENDING || state_ == State::SENT) {
       doc["sent"] = sentBytes_;
-      doc["size"] = expectedSize_;
-    } else if (state_ == State::UPDATING || state_ == State::RESTARTING) {
-      doc["written"] = flashWrittenBytes_;
       doc["size"] = expectedSize_;
     } else {
       doc["received"] = receivedBytes_;
@@ -2041,6 +1987,11 @@ std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const 
   // `state` already says ERROR; the message is the part that can be any length,
   // so it is the part that goes when the payload is tight.
   if (wantProgress && state_ == State::ERROR && !errorMessage_.empty()) doc["error"] = errorMessage_.c_str();
+  // Why the last hello was refused. Separate from `error` and not tied to
+  // State::ERROR, because a refused hello leaves the session healthy and the code
+  // on screen; read together with `has_trusted_host` it tells the client whether
+  // to forget its saved credential or fix it. Cleared by the next accepted hello.
+  if (wantProgress && !authErrorMessage_.empty()) doc["auth_error"] = authErrorMessage_.c_str();
   // The request channel. When the device wants something from the app it says so
   // here, and the app answers with an upload naming the same `req`. Absent
   // whenever nothing is outstanding.
@@ -2051,278 +2002,4 @@ std::string BleTransferActivity::buildStatusJson(const StatusScope scope, const 
   return output.c_str();
 }
 
-void BleTransferActivity::render(RenderLock&&) {
-  if (state_ == State::FIRMWARE_CONFIRM) {
-    renderFirmwareConfirm();
-    return;
-  }
-  if (state_ == State::UPDATING) {
-    renderFirmwareUpdating();
-    return;
-  }
-  if (state_ == State::SAVE_HOST_PROMPT) {
-    renderSaveHostPrompt();
-    return;
-  }
-  if (state_ == State::FORGET_HOST_PROMPT) {
-    renderForgetHostPrompt();
-    return;
-  }
-  if (store_) {
-    // The Store owns the whole screen in its mode; the session's own states
-    // (receiving, error) are reported through it, not around it.
-    store_->render(sessionCode_);
-    return;
-  }
-
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
-
-  renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BLUETOOTH_TRANSFER));
-
-  const int centerY = pageHeight / 2 - 30;
-  std::string primary;
-  std::string secondary;
-
-  switch (state_) {
-    case State::STARTING:
-      primary = tr(STR_LOADING_POPUP);
-      break;
-    case State::ADVERTISING:
-      primary = tr(STR_BLE_TRANSFER_READY);
-      secondary = std::string(tr(STR_BLE_TRANSFER_CODE)) + sessionCode_;
-      break;
-    case State::CONNECTED:
-      primary = tr(STR_CONNECTED);
-      secondary = std::string(tr(STR_BLE_TRANSFER_CODE)) + sessionCode_;
-      break;
-    case State::RECEIVING: {
-      primary = tr(STR_BLE_TRANSFER_RECEIVING);
-      char buffer[48];
-      snprintf(buffer, sizeof(buffer), "%u / %u bytes", static_cast<unsigned>(receivedBytes_),
-               static_cast<unsigned>(expectedSize_));
-      secondary = buffer;
-      break;
-    }
-    case State::VERIFYING:
-      primary = tr(STR_BLE_TRANSFER_VERIFYING);
-      secondary = fileName_;
-      break;
-    case State::SAVED:
-      if (transferKind_ == TransferKind::PROGRESS) {
-        primary = tr(STR_BLE_TRANSFER_PROGRESS_SAVED);
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "%u / %u", static_cast<unsigned>(progressApplied_),
-                 static_cast<unsigned>(progressEntries_));
-        secondary = buffer;
-      } else {
-        primary = tr(STR_BLE_TRANSFER_SAVED);
-        secondary = savedPath_.empty() ? fileName_ : savedPath_;
-      }
-      break;
-    case State::RESTARTING:
-      primary = tr(STR_BLE_TRANSFER_RESTARTING);
-      secondary = tr(STR_BLE_TRANSFER_FIRMWARE_UPDATED);
-      break;
-    case State::PREPARING:
-      primary = tr(STR_BLE_TRANSFER_PREPARING_LIBRARY);
-      break;
-    case State::SENDING: {
-      if (transferKind_ == TransferKind::LIBRARY) {
-        primary = tr(STR_BLE_TRANSFER_SENDING_LIBRARY);
-      } else if (transferKind_ == TransferKind::PROGRESS_RESULT) {
-        primary = tr(STR_BLE_TRANSFER_SENDING_RESULTS);
-      } else {
-        primary = tr(STR_BLE_TRANSFER_SENDING);
-      }
-      char buffer[48];
-      snprintf(buffer, sizeof(buffer), "%u / %u bytes", static_cast<unsigned>(sentBytes_),
-               static_cast<unsigned>(expectedSize_));
-      secondary = buffer;
-      break;
-    }
-    case State::SENT:
-      if (transferKind_ == TransferKind::LIBRARY) {
-        primary = tr(STR_BLE_TRANSFER_LIBRARY_SENT);
-      } else if (transferKind_ == TransferKind::PROGRESS_RESULT) {
-        primary = tr(STR_BLE_TRANSFER_RESULTS_SENT);
-      } else {
-        primary = tr(STR_BLE_TRANSFER_SENT);
-      }
-      secondary = fileName_;
-      break;
-    case State::ERROR:
-      primary = tr(STR_ERROR_MSG);
-      secondary = errorMessage_;
-      break;
-    case State::FIRMWARE_CONFIRM:
-    case State::UPDATING:
-    case State::SAVE_HOST_PROMPT:
-    case State::FORGET_HOST_PROMPT:
-      return;
-  }
-
-  if (state_ == State::ADVERTISING || state_ == State::CONNECTED) {
-    renderCompanionReady(primary, secondary);
-    const char* forgetLabel = BLE_TRUSTED_HOSTS.hasHosts() ? tr(STR_FORGET_BUTTON) : "";
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", forgetLabel, "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-    renderer.displayBuffer();
-    return;
-  }
-
-  renderer.drawCenteredText(UI_10_FONT_ID, centerY, primary.c_str(), true, EpdFontFamily::BOLD);
-  if (!secondary.empty()) {
-    renderer.drawCenteredText(UI_10_FONT_ID, centerY + renderer.getLineHeight(UI_10_FONT_ID) + 8, secondary.c_str());
-  }
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer();
-}
-
-void BleTransferActivity::renderCompanionReady(const std::string& primary, const std::string& secondary) const {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const int pageWidth = renderer.getScreenWidth();
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
-  int y = contentTop;
-
-  renderer.drawCenteredText(UI_10_FONT_ID, y, primary.c_str(), true, EpdFontFamily::BOLD);
-  y += lineHeight + metrics.verticalSpacing;
-  renderer.drawCenteredText(SMALL_FONT_ID, y, BLE_TRANSFER_WEB_URL, true);
-  y += renderer.getLineHeight(SMALL_FONT_ID) + metrics.verticalSpacing;
-
-  const int availableHeight = renderer.getScreenHeight() - y - metrics.verticalSpacing - lineHeight;
-  const int qrSize = std::min({BLE_TRANSFER_QR_SIZE, pageWidth - metrics.contentSidePadding * 2, availableHeight});
-  if (qrSize > 0) {
-    const Rect qrBounds((pageWidth - qrSize) / 2, y, qrSize, qrSize);
-    QrUtils::drawQrCode(renderer, qrBounds, BLE_TRANSFER_WEB_URL);
-    y += qrSize + metrics.verticalSpacing;
-  }
-  if (!secondary.empty()) renderer.drawCenteredText(UI_10_FONT_ID, y, secondary.c_str(), true);
-}
-
-void BleTransferActivity::renderFirmwareConfirm() const {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
-  const auto height = renderer.getLineHeight(UI_10_FONT_ID);
-  const auto top = (pageHeight - height * 3) / 2;
-
-  renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BLUETOOTH_TRANSFER));
-  renderer.drawCenteredText(UI_12_FONT_ID, top - 40, tr(STR_FIRMWARE_UPDATE_PROMPT), true, EpdFontFamily::BOLD);
-  renderer.drawCenteredText(UI_10_FONT_ID, top, fileName_.empty() ? "firmware.bin" : fileName_.c_str());
-  renderer.drawCenteredText(UI_10_FONT_ID, top + 40, tr(STR_BLE_TRANSFER_RESTART_AFTER_FLASH));
-
-  const int buttonY = top + 80;
-  constexpr int buttonWidth = 80;
-  constexpr int buttonSpacing = 30;
-  constexpr int totalWidth = buttonWidth * 2 + buttonSpacing;
-  const int startX = (pageWidth - totalWidth) / 2;
-  const std::string yesLabel = tr(STR_YES);
-  const std::string noLabel = tr(STR_NO);
-  const std::string yesText = promptSelection_ == 0 ? "[" + yesLabel + "]" : yesLabel;
-  const std::string noText = promptSelection_ == 1 ? "[" + noLabel + "]" : noLabel;
-
-  renderer.drawText(UI_10_FONT_ID, startX + (promptSelection_ == 0 ? 0 : 4), buttonY, yesText.c_str());
-  renderer.drawText(UI_10_FONT_ID, startX + buttonWidth + buttonSpacing + (promptSelection_ == 1 ? 0 : 4), buttonY,
-                    noText.c_str());
-
-  const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer();
-}
-
-void BleTransferActivity::renderFirmwareUpdating() const {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
-
-  renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BLUETOOTH_TRANSFER));
-  const int centerY = pageHeight / 2 - 54;
-  renderer.drawCenteredText(UI_12_FONT_ID, centerY, tr(STR_BLE_TRANSFER_WRITING_FIRMWARE), true, EpdFontFamily::BOLD);
-
-  const int percent = expectedSize_ > 0 ? static_cast<int>((flashWrittenBytes_ * 100) / expectedSize_) : 0;
-  GUI.drawProgressBar(renderer,
-                      Rect{metrics.contentSidePadding, centerY + 36, pageWidth - metrics.contentSidePadding * 2,
-                           metrics.progressBarHeight},
-                      percent, 100);
-
-  char progress[32];
-  const auto writtenTenthsMb = static_cast<unsigned>((static_cast<uint64_t>(flashWrittenBytes_) * 10) / (1024 * 1024));
-  const auto totalTenthsMb = static_cast<unsigned>((static_cast<uint64_t>(expectedSize_) * 10) / (1024 * 1024));
-  snprintf(progress, sizeof(progress), "%u.%u / %u.%u MB", writtenTenthsMb / 10, writtenTenthsMb % 10,
-           totalTenthsMb / 10, totalTenthsMb % 10);
-  renderer.drawCenteredText(UI_10_FONT_ID, centerY + 92, progress);
-  renderer.drawCenteredText(UI_10_FONT_ID, centerY + 122, tr(STR_BLE_TRANSFER_FLASH_TIME_HINT));
-  renderer.drawCenteredText(UI_10_FONT_ID, centerY + 150, tr(STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF));
-  renderer.displayBuffer();
-}
-
-void BleTransferActivity::renderSaveHostPrompt() const {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
-  const auto height = renderer.getLineHeight(UI_10_FONT_ID);
-  const auto top = (pageHeight - height * 3) / 2;
-
-  renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BLUETOOTH_TRANSFER));
-  renderer.drawCenteredText(UI_12_FONT_ID, top - 40, tr(STR_BLE_SAVE_HOST), true, EpdFontFamily::BOLD);
-  renderer.drawCenteredText(UI_10_FONT_ID, top,
-                            candidateHostName_.empty() ? "Trusted host" : candidateHostName_.c_str());
-  renderer.drawCenteredText(UI_10_FONT_ID, top + 40, tr(STR_BLE_SAVE_HOST_PROMPT));
-
-  const int buttonY = top + 80;
-  constexpr int buttonWidth = 60;
-  constexpr int buttonSpacing = 30;
-  constexpr int totalWidth = buttonWidth * 2 + buttonSpacing;
-  const int startX = (pageWidth - totalWidth) / 2;
-  const std::string yesLabel = tr(STR_YES);
-  const std::string noLabel = tr(STR_NO);
-  const std::string yesText = promptSelection_ == 0 ? "[" + yesLabel + "]" : yesLabel;
-  const std::string noText = promptSelection_ == 1 ? "[" + noLabel + "]" : noLabel;
-
-  renderer.drawText(UI_10_FONT_ID, startX + (promptSelection_ == 0 ? 0 : 4), buttonY, yesText.c_str());
-  renderer.drawText(UI_10_FONT_ID, startX + buttonWidth + buttonSpacing + (promptSelection_ == 1 ? 0 : 4), buttonY,
-                    noText.c_str());
-
-  const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer();
-}
-
-void BleTransferActivity::renderForgetHostPrompt() const {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto pageHeight = renderer.getScreenHeight();
-  const auto height = renderer.getLineHeight(UI_10_FONT_ID);
-  const auto top = (pageHeight - height * 3) / 2;
-
-  renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_BLUETOOTH_TRANSFER));
-  renderer.drawCenteredText(UI_12_FONT_ID, top - 40, tr(STR_BLE_FORGET_HOST), true, EpdFontFamily::BOLD);
-  renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_BLE_FORGET_HOST_PROMPT));
-
-  const int buttonY = top + 80;
-  constexpr int buttonWidth = 120;
-  constexpr int buttonSpacing = 30;
-  constexpr int totalWidth = buttonWidth * 2 + buttonSpacing;
-  const int startX = (pageWidth - totalWidth) / 2;
-  const std::string cancelLabel = tr(STR_CANCEL);
-  const std::string forgetLabel = tr(STR_FORGET_BUTTON);
-  const std::string cancelText = promptSelection_ == 0 ? "[" + cancelLabel + "]" : cancelLabel;
-  const std::string forgetText = promptSelection_ == 1 ? "[" + forgetLabel + "]" : forgetLabel;
-
-  renderer.drawText(UI_10_FONT_ID, startX + (promptSelection_ == 0 ? 0 : 4), buttonY, cancelText.c_str());
-  renderer.drawText(UI_10_FONT_ID, startX + buttonWidth + buttonSpacing + (promptSelection_ == 1 ? 0 : 4), buttonY,
-                    forgetText.c_str());
-
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer();
-}
+#endif  // FREEINK_CAP_BLE_TRANSFER

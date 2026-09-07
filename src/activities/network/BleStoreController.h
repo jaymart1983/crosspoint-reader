@@ -43,7 +43,7 @@ class MappedInputManager;
 // most ATT_MTU-3 -- 20 bytes on a peer that never exchanges MTUs. So the
 // notified document is built separately and kept under 180 bytes, shedding whole
 // fields until it fits rather than ever being truncated; the GATT read returns
-// the whole thing. See buildNotifyJson() in BleTransferActivity.cpp. `pending`
+// the whole thing. See buildNotifyJson() in BleLink.cpp. `pending`
 // is near the bottom of that shed order, so a request reaches the app intact.
 //
 // RETRY. A GATT notification is unacknowledged -- there is no ATT-level
@@ -130,7 +130,11 @@ class BleStoreController {
   // --- UI --------------------------------------------------------------------
   // Returns true when the frame was consumed.
   bool handleInput();
-  void render(const std::string& sessionCode) const;
+  // Only ever reached with a phone already paired: the Store screen shows its own
+  // "pair a phone" prompt when there is none, because the recovery from that is a
+  // different screen entirely (Settings > Bluetooth) rather than anything the
+  // catalogue can offer.
+  void render() const;
 
  private:
   void issue(PendingOp op, uint32_t offset, const std::string& id);
@@ -139,7 +143,7 @@ class BleStoreController {
 
   int listRowHeight() const;
   int listTop() const;
-  void renderWaiting(const std::string& sessionCode) const;
+  void renderWaiting() const;
   void renderLoading() const;
   void renderList() const;
   void renderDetail() const;

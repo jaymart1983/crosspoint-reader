@@ -88,14 +88,23 @@ class ActivityManager {
   void replaceActivity(std::unique_ptr<Activity>&& newActivity);
 
   // goTo... functions are convenient wrapper for replaceActivity()
+#if FREEINK_CAP_NETWORK
+  // WiFi file transfer. Network-less boards have no such screen: USB Drive is
+  // automatic and Bluetooth is always on.
   void goToFileTransfer();
-  void goToUsbDrive();
+#endif
+  // USB mass storage. Entered automatically when a cable is plugged into an
+  // awake device (see main.cpp), and from the WiFi transfer menu where there
+  // still is one.
+  void goToUsbDrive(bool automatic = false);
 #if FREEINK_CAP_BLE_TRANSFER
-  void goToBluetoothTransfer();
-  // The Calibre store. Same BLE session as Bluetooth Transfer -- one NimBLE
-  // server, one auth gate, one framing layer -- in its browsing mode.
+  // The Calibre store, browsed over the always-on BLE link.
   void goToStore();
 #endif
+  // Validate, confirm and flash `path`. `stagedDrop` says the image came out of
+  // the watched /firmware folder, which is the only case that clears that folder
+  // afterwards.
+  void goToFirmwareUpdate(std::string path, bool stagedDrop);
   // Browse Files / Recent Books / File Transfer / Settings, demoted off the
   // home screen when home became a shelf.
   void goToMoreMenu();

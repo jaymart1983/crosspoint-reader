@@ -130,16 +130,20 @@ Endpoint details are documented in [webserver-endpoints.md](./webserver-endpoint
 
 ## Bluetooth File Transfer
 
-CrossPoint Reader also supports Bluetooth transfer from **File Transfer > Bluetooth Transfer**. Bluetooth is advertised
-only while that screen is open. It is a convenient path for quick reader interactions where joining WiFi or starting a
-hotspot is more work than the transfer itself, such as pulling a crash report, dropping a BMP image, or sending a book.
+CrossPoint Reader also supports Bluetooth transfer. **Bluetooth is advertised whenever the reader is awake** — there
+is no screen to open first, and no File Transfer menu any more. It is a convenient path for quick reader interactions
+where joining WiFi or starting a hotspot is more work than the transfer itself, such as pulling a crash report,
+dropping a BMP image, or sending a book.
 
 Open <https://ble.xteink.lol/> in a Web Bluetooth-compatible Chromium browser, connect to the reader, and enter the
-six-digit code shown on the screen. After the reader confirms saving the browser, future transfers can use trusted
-browser authentication without re-entering the code. The reader asks to save the browser after a successful upload.
+six-digit code from **Settings > Bluetooth** — the one page on the device where pairing happens, and the one page that
+always shows the code. The reader saves the browser as a trusted host the moment that code is accepted, so later
+sessions authenticate without it. Forget a saved host from the same page.
 
-The browser companion supports EPUB and BMP uploads and crash-report download. Firmware updates are available through
-the command-line tool:
+The browser companion supports EPUB and BMP uploads and crash-report download. Firmware pushes are available through
+the command-line tool; a push now stages `/firmware/firmware.bin` and its checksum on the card rather than flashing
+during the session, and the reader offers the update on its own once the image checks out (see
+[BLE Transfer Protocol](./ble-transfer-protocol.md#firmware-updates)):
 
 ```sh
 python3 scripts/ble_transfer.py put-book path/to/book.epub --code 123456
@@ -163,8 +167,8 @@ documented in [BLE Transfer Protocol](./ble-transfer-protocol.md).
 - **No authentication is required** - anyone on the same network can access the interface
 - The web server is only accessible while the WiFi screen shows "Connected"
 - The web server automatically stops when you exit the WiFi screen
-- Bluetooth transfer requires the visible code on first use or a trusted host saved on the reader
-- Bluetooth transfer is only available while the Bluetooth Transfer screen is open
+- Bluetooth transfer requires the code from Settings > Bluetooth on first use, or a trusted host saved on the reader
+- Bluetooth is advertised whenever the reader is awake, and stops when it sleeps
 - For security, only use on trusted private networks
 
 

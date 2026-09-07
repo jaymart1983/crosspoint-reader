@@ -132,33 +132,15 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
     modeName = "Connect to Calibre";
   } else if (mode == NetworkMode::CREATE_HOTSPOT) {
     modeName = "Create Hotspot";
-#if FREEINK_CAP_USB_MSC
-  } else if (mode == NetworkMode::USB_DRIVE) {
-    modeName = "USB Drive";
-#endif
-#if FREEINK_CAP_BLE_TRANSFER
-  } else if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
-    modeName = "Bluetooth Transfer";
-#endif
   }
   LOG_DBG("WEBACT", "Network mode selected: %s", modeName);
 
-#if FREEINK_CAP_USB_MSC
-  if (mode == NetworkMode::USB_DRIVE) {
-    activityManager.goToUsbDrive();
-    return;
-  }
-#endif
+  // USB_DRIVE and BLUETOOTH_TRANSFER are no longer rows on the chooser and so can
+  // no longer arrive here -- USB Drive starts itself on a plug edge and the BLE
+  // link is always up. The enumerators survive only so the rest keep their values.
 
   networkMode = mode;
   isApMode = (mode == NetworkMode::CREATE_HOTSPOT);
-
-#if FREEINK_CAP_BLE_TRANSFER
-  if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
-    activityManager.goToBluetoothTransfer();
-    return;
-  }
-#endif
 
   if (mode == NetworkMode::CONNECT_CALIBRE) {
     startActivityForResult(
