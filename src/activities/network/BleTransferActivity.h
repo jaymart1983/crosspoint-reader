@@ -33,7 +33,7 @@ class BleTransferActivity final : public Activity {
     FORGET_HOST_PROMPT,
     ERROR
   };
-  enum class TransferKind { NONE, BOOK, BMP, FIRMWARE, CRASH_REPORT, LIBRARY };
+  enum class TransferKind { NONE, BOOK, BMP, FIRMWARE, PROGRESS, CRASH_REPORT, LIBRARY, PROGRESS_RESULT };
 
   explicit BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
   ~BleTransferActivity() override;
@@ -93,6 +93,12 @@ class BleTransferActivity final : public Activity {
   size_t lastProgressStatusBytes_ = 0;
   size_t lastDisplayProgressBytes_ = 0;
   unsigned int lastFirmwareFlashRenderedPercent_ = 101;
+  // Outcome of the last `progress` batch. Deliberately not cleared by
+  // resetTransfer(): the client reads the summary from the status published when
+  // the batch finished, then issues a `start_get` for the per-entry document,
+  // and that start_get resets the transfer state.
+  uint32_t progressEntries_ = 0;
+  uint32_t progressApplied_ = 0;
   size_t uploadChunkSize_ = 0;
   size_t uploadAckBytes_ = 0;
   size_t downloadChunkSize_ = 0;
@@ -124,6 +130,8 @@ class BleTransferActivity final : public Activity {
   void startFileDownload(const char* path, const char* name, TransferKind kind, size_t offset, size_t chunkSize);
   void startCrashReportDownload(size_t offset, size_t chunkSize);
   void startLibraryDownload(size_t offset, size_t chunkSize);
+  void startProgressResultDownload(size_t offset, size_t chunkSize);
+  void processProgressBatch();
   void pumpDownload();
   void resetTransfer(bool removePart);
   void setState(State state);

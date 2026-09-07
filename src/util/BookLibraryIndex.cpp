@@ -16,8 +16,10 @@
 #include <string_view>
 #include <vector>
 
+#include "BookProgressSync.h"
 #include "ProgressMapper.h"
 #include "TaskWatchdog.h"
+#include "activities/reader/ProgressFile.h"
 
 namespace {
 
@@ -51,18 +53,23 @@ struct BookInfo {
   std::string author;
   float percent = 0.0f;
   bool fromMetadataCache = false;
+  // The saved position exactly as progress.bin holds it, hex-encoded. Empty when
+  // the book has never been opened, or its progress file is unreadable.
+  std::string location;
+  // When that position was saved. Absent for a book saved before the device kept
+  // timestamps, or saved while it had no working clock -- which a client must
+  // read as "unknown", never as epoch 0.
+  uint32_t timestamp = 0;
+  bool hasTimestamp = false;
 };
 
-// progress.bin is opaque and format-specific; these two readers mirror exactly
+// progress.bin is opaque and format-specific; these two parsers mirror exactly
 // what the reader activities write (EpubReaderActivity::loadProgress and
-// XtcReaderActivity::loadProgress). Nothing else about the file is interpreted
-// here -- the position it yields is handed to ProgressMapper.
-bool readEpubProgress(const std::string& cachePath, CrossPointPosition& pos) {
-  HalFile f;
-  if (!Storage.openFileForRead(TAG, cachePath + "/progress.bin", f)) return false;
-  uint8_t data[10] = {};
-  const int read = f.read(data, sizeof(data));
-  if (read != 4 && read != 6 && read != 10) return false;
+// XtcReaderActivity::loadProgress). They exist only to derive `percent` for
+// display -- the bytes themselves are what the listing actually reports, in
+// `location`, and they are copied out verbatim without being interpreted.
+bool parseEpubProgress(const uint8_t* data, const size_t len, CrossPointPosition& pos) {
+  if (len != 4 && len != 6 && len != 10) return false;
 
   pos.spineIndex = data[0] | (data[1] << 8);
   int page = data[2] | (data[3] << 8);
@@ -73,15 +80,12 @@ bool readEpubProgress(const std::string& cachePath, CrossPointPosition& pos) {
   pos.pageNumber = page;
   // The 4-byte form predates the chapter page count. Without it there is no
   // intra-chapter fraction, so progress resolves to the chapter boundary.
-  pos.totalPages = (read >= 6) ? (data[4] | (data[5] << 8)) : 0;
+  pos.totalPages = (len >= 6) ? (data[4] | (data[5] << 8)) : 0;
   return true;
 }
 
-bool readXtcProgressPage(const std::string& cachePath, uint32_t& page) {
-  HalFile f;
-  if (!Storage.openFileForRead(TAG, cachePath + "/progress.bin", f)) return false;
-  uint8_t data[4] = {};
-  if (f.read(data, sizeof(data)) != static_cast<int>(sizeof(data))) return false;
+bool parseXtcProgressPage(const uint8_t* data, const size_t len, uint32_t& page) {
+  if (len != 4) return false;
   page = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
          (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
   return true;
@@ -89,6 +93,18 @@ bool readXtcProgressPage(const std::string& cachePath, uint32_t& page) {
 
 BookInfo describeBook(const std::string& path, const std::string& fileName) {
   BookInfo info;
+
+  // The position first, and independently of metadata: it is the field the sync
+  // path actually needs, and it is readable for every format the reader can open
+  // -- including .txt/.md, whose percentage is not recoverable.
+  uint8_t location[BookProgressSync::MAX_PROGRESS_BYTES] = {};
+  size_t locationLen = 0;
+  const std::string cachePath = BookProgressSync::cachePathForBook(path);
+  const bool hasLocation = BookProgressSync::readProgressBlob(cachePath, location, locationLen);
+  if (hasLocation) {
+    info.location = BookProgressSync::encodeLocation(location, locationLen);
+    info.hasTimestamp = ProgressFile::readSavedTime(cachePath, info.timestamp);
+  }
 
   if (FsHelpers::hasEpubExtension(fileName)) {
     // The per-book metadata cache is the only affordable source of title/author:
@@ -105,7 +121,7 @@ BookInfo describeBook(const std::string& path, const std::string& fileName) {
         info.author = epub->getAuthor();
         info.fromMetadataCache = true;
         CrossPointPosition pos{};
-        if (readEpubProgress(epub->getCachePath(), pos)) {
+        if (hasLocation && parseEpubProgress(location, locationLen, pos)) {
           info.percent = ProgressMapper::toPercentage(epub, pos);
         }
       }
@@ -119,7 +135,7 @@ BookInfo describeBook(const std::string& path, const std::string& fileName) {
       info.author = xtc.getAuthor();
       info.fromMetadataCache = true;
       uint32_t page = 0;
-      if (readXtcProgressPage(xtc.getCachePath(), page)) {
+      if (hasLocation && parseXtcProgressPage(location, locationLen, page)) {
         info.percent = static_cast<float>(xtc.calculateProgress(page)) / 100.0f;
       }
     }
@@ -127,7 +143,9 @@ BookInfo describeBook(const std::string& path, const std::string& fileName) {
   // .txt/.md carry no embedded metadata, and their progress.bin holds a page
   // index whose page count depends on the current font/margin/viewport, none of
   // which is recorded next to it. There is no percentage on disk to report, so
-  // they list with the filename as title and percent 0.
+  // they list with the filename as title and percent 0 -- but `location` and
+  // `timestamp` above are still exact, which is precisely why syncing on the
+  // stored position rather than a percentage covers these books at all.
 
   if (info.title.empty()) {
     // Never omit a book because its metadata is missing: the filename is always
@@ -192,11 +210,19 @@ bool writeEntry(HalFile& out, bool& first, const std::string& relPath, const uin
   // Trimmed to four decimals: 0.01% is far finer than any progress bar, and the
   // shorter number keeps a large shelf's document smaller on the wire.
   doc["percent"] = std::round(info.percent * 10000.0f) / 10000.0f;
-  // "lastRead" is deliberately absent. Nothing on the device records when a book
-  // was last opened: progress.bin carries a position and no time, SdFat has no
-  // date-time callback installed here (so file timestamps are not real), and the
-  // RTC exposes only hour/minute. Emitting an invented value would be worse than
-  // omitting the field, which the protocol allows.
+  // `location` is the field to sync on; `percent` is for display only. It is the
+  // saved position byte for byte, so a client can hand it straight back in a
+  // `progress` upload and the book reopens exactly where it was -- no percentage
+  // is ever converted into a position.
+  if (!info.location.empty()) doc["location"] = info.location;
+  // Omitted, not zeroed, when the save predates timestamping or happened while
+  // the device had no clock. An absent `timestamp` means "unknown", which the
+  // conflict rule treats as older than any real one.
+  if (info.hasTimestamp) doc["timestamp"] = info.timestamp;
+  // "lastRead" is still deliberately absent. It was specified as optional and
+  // vague ("when was this book last read"); `timestamp` answers the precise
+  // question the sync path asks -- when the position in `location` was written --
+  // so clients should read that instead.
   String json;
   serializeJson(doc, json);
 

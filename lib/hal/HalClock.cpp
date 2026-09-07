@@ -7,6 +7,70 @@
 #include <esp_sntp.h>
 #endif
 
+namespace {
+
+// Proleptic Gregorian civil <-> days-since-1970 (Howard Hinnant's algorithms).
+//
+// Deliberately not mktime()/gmtime(): the RTC holds UTC and this build has no
+// network stack, so nothing ever calls configTzTime() and libc's TZ is whatever
+// the core left it. These two functions are pure arithmetic and cannot be
+// perturbed by a time zone.
+int32_t daysFromCivil(int32_t y, const uint32_t m, const uint32_t d) {
+  y -= m <= 2;
+  const int32_t era = (y >= 0 ? y : y - 399) / 400;
+  const uint32_t yoe = static_cast<uint32_t>(y - era * 400);                        // [0, 399]
+  const uint32_t doy = (153U * (m + (m > 2 ? -3U : 9U)) + 2U) / 5U + d - 1U;         // [0, 365]
+  const uint32_t doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;                     // [0, 146096]
+  return era * 146097 + static_cast<int32_t>(doe) - 719468;
+}
+
+void civilFromDays(int32_t z, int32_t& y, uint32_t& m, uint32_t& d) {
+  z += 719468;
+  const int32_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const uint32_t doe = static_cast<uint32_t>(z - era * 146097);                      // [0, 146096]
+  const uint32_t yoe = (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;    // [0, 399]
+  const uint32_t doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);                   // [0, 365]
+  const uint32_t mp = (5U * doy + 2U) / 153U;                                        // [0, 11]
+  d = doy - (153U * mp + 2U) / 5U + 1U;                                              // [1, 31]
+  m = mp + (mp < 10U ? 3U : -9U);                                                    // [1, 12]
+  y = static_cast<int32_t>(yoe) + era * 400 + static_cast<int32_t>(m <= 2U);
+}
+
+// 0 means "this date is not a representable UTC epoch", which every caller
+// treats as unknown. Nothing downstream may read 0 as a real instant.
+uint32_t epochFromDateTime(const Rtc::DateTime& dt) {
+  if (dt.year < 1970 || dt.year > 2100 || dt.month < 1 || dt.month > 12 || dt.day < 1 || dt.day > 31 ||
+      dt.hour > 23 || dt.minute > 59 || dt.second > 59) {
+    return 0;
+  }
+  const int32_t days = daysFromCivil(static_cast<int32_t>(dt.year), dt.month, dt.day);
+  if (days < 0) return 0;
+  return static_cast<uint32_t>(days) * 86400UL + static_cast<uint32_t>(dt.hour) * 3600UL +
+         static_cast<uint32_t>(dt.minute) * 60UL + dt.second;
+}
+
+Rtc::DateTime dateTimeFromEpoch(const uint32_t epochUtc) {
+  const int32_t days = static_cast<int32_t>(epochUtc / 86400UL);
+  const uint32_t secondOfDay = epochUtc % 86400UL;
+  int32_t year = 1970;
+  uint32_t month = 1;
+  uint32_t day = 1;
+  civilFromDays(days, year, month, day);
+
+  Rtc::DateTime dt;
+  dt.year = static_cast<uint16_t>(year);
+  dt.month = static_cast<uint8_t>(month);
+  dt.day = static_cast<uint8_t>(day);
+  dt.hour = static_cast<uint8_t>(secondOfDay / 3600UL);
+  dt.minute = static_cast<uint8_t>((secondOfDay % 3600UL) / 60UL);
+  dt.second = static_cast<uint8_t>(secondOfDay % 60UL);
+  // 1970-01-01 was a Thursday, and DateTime::weekday is 0 = Sunday.
+  dt.weekday = static_cast<uint8_t>(((days % 7) + 11) % 7);
+  return dt;
+}
+
+}  // namespace
+
 HalClock halClock;  // Singleton instance
 
 void HalClock::begin() {
@@ -14,30 +78,69 @@ void HalClock::begin() {
   LOG_INF("CLK", _available ? "SDK RTC found" : "RTC not found");
 }
 
-bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
-  if (!_available) return false;
-
+void HalClock::refreshCache() const {
+  if (!_available) return;
   const unsigned long now = millis();
-  if (_lastPollMs != 0 && (now - _lastPollMs) < CLOCK_POLL_MS) {
-    hour = _cachedHour;
-    minute = _cachedMinute;
-    return true;
-  }
+  if (_lastPollMs != 0 && (now - _lastPollMs) < CLOCK_POLL_MS) return;
 
   Rtc::DateTime dt;
   if (!_sdkRtc.now(dt)) {
-    if (!_hasCachedTime) return false;
+    // Either an I2C error or the RTC telling us its oscillator stopped, which is
+    // how a never-set (or backup-power-lost) clock reports itself. Throttle the
+    // retry but keep any cache we already have -- and, crucially, do not
+    // manufacture a time here.
     _lastPollMs = now;
-    hour = _cachedHour;
-    minute = _cachedMinute;
-    return true;
+    return;
   }
   _cachedHour = dt.hour;
   _cachedMinute = dt.minute;
+  _cachedEpoch = epochFromDateTime(dt);
   _lastPollMs = now;
+  _lastSyncMs = now;
   _hasCachedTime = true;
+}
+
+bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
+  if (!_available) return false;
+  refreshCache();
+  if (!_hasCachedTime) return false;
   hour = _cachedHour;
   minute = _cachedMinute;
+  return true;
+}
+
+bool HalClock::getEpoch(uint32_t& epochUtc) const {
+  if (!_available) return false;
+  refreshCache();
+  if (!_hasCachedTime || !isPlausibleEpoch(_cachedEpoch)) return false;
+  // The RTC is only read every CLOCK_POLL_MS; carry the cached instant forward
+  // with millis() so two saves inside one poll window are still ordered.
+  const unsigned long elapsedMs = millis() - _lastSyncMs;
+  const uint32_t candidate = _cachedEpoch + static_cast<uint32_t>(elapsedMs / 1000UL);
+  if (!isPlausibleEpoch(candidate)) return false;
+  epochUtc = candidate;
+  return true;
+}
+
+bool HalClock::setEpoch(const uint32_t epochUtc) {
+  if (!_available) return false;
+  if (!isPlausibleEpoch(epochUtc)) {
+    LOG_ERR("CLK", "Refusing to set RTC to implausible epoch %lu", static_cast<unsigned long>(epochUtc));
+    return false;
+  }
+  const Rtc::DateTime dt = dateTimeFromEpoch(epochUtc);
+  if (!_sdkRtc.set(dt)) {
+    LOG_ERR("CLK", "RTC write failed");
+    return false;
+  }
+  _cachedHour = dt.hour;
+  _cachedMinute = dt.minute;
+  _cachedEpoch = epochUtc;
+  _lastPollMs = millis();
+  _lastSyncMs = _lastPollMs;
+  _hasCachedTime = true;
+  LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC (epoch %lu)", dt.year, dt.month, dt.day, dt.hour,
+          dt.minute, dt.second, static_cast<unsigned long>(epochUtc));
   return true;
 }
 
@@ -102,9 +205,11 @@ bool HalClock::syncFromNTP() {
       dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
       dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
       if (_sdkRtc.set(dt)) {
-        _lastPollMs = 0;
+        _lastPollMs = 0;  // force a re-read on the next poll
         _cachedHour = dt.hour;
         _cachedMinute = dt.minute;
+        _cachedEpoch = epochFromDateTime(dt);
+        _lastSyncMs = millis();
         _hasCachedTime = true;
         LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
                 dt.second);

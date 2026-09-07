@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <HalClock.h>
 #include <NimBLEDevice.h>
 #include <esp_mac.h>
 #include <esp_ota_ops.h>
@@ -28,7 +29,9 @@
 #include "network/FirmwareFlasher.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookLibraryIndex.h"
+#include "util/BookProgressSync.h"
 #include "util/QrUtils.h"
+#include "util/TaskWatchdog.h"
 
 namespace {
 
@@ -51,9 +54,31 @@ constexpr const char* CRASH_REPORT_NAME = "crash_report.txt";
 // gives it a known size and a resumable offset.
 constexpr const char* LIBRARY_INDEX_PATH = "/.crosspoint/ble-library.json";
 constexpr const char* LIBRARY_INDEX_NAME = "library.json";
+constexpr const char* CROSSPOINT_ROOT = "/.crosspoint";
+// A `progress` batch is staged like any other upload -- part file, SHA-256 over
+// the whole thing, rename on commit -- and only then parsed. Verifying before
+// touching a single book means a truncated batch cannot half-apply.
+constexpr const char* PROGRESS_BATCH_PART_PATH = "/.crosspoint/ble-progress.json.part";
+constexpr const char* PROGRESS_BATCH_PATH = "/.crosspoint/ble-progress.json";
+constexpr const char* PROGRESS_BATCH_NAME = "progress.json";
+// Per-entry outcomes go to SD and are served as an ordinary download. They do
+// not fit in `status`: a notification carries at most ATT_MTU-3 bytes, so a
+// shelf-sized result array would be silently truncated on the wire.
+constexpr const char* PROGRESS_RESULT_PATH = "/.crosspoint/ble-progress-result.json";
+constexpr const char* PROGRESS_RESULT_NAME = "progress-result.json";
 constexpr size_t MIN_BLE_FIRMWARE_BYTES = 64UL * 1024UL;
 constexpr size_t MAX_BLE_BOOK_BYTES = 32UL * 1024UL * 1024UL;
 constexpr size_t MAX_BLE_BMP_BYTES = 8UL * 1024UL * 1024UL;
+// ~120 bytes per entry, so this is a shelf of a few thousand books with room to
+// spare, and still a bounded amount of SD scratch.
+constexpr size_t MAX_BLE_PROGRESS_BYTES = 512UL * 1024UL;
+// One entry is parsed at a time and never exceeds this; the cap is what keeps a
+// hostile or corrupt document from growing a std::string without bound.
+constexpr size_t MAX_PROGRESS_ENTRY_BYTES = 640;
+constexpr uint32_t MAX_PROGRESS_ENTRIES = 8192;
+// A book path relative to /Books. Longer than MAX_FILENAME_BYTES because the
+// `library` listing emits sub-folder paths and this must round-trip them.
+constexpr size_t MAX_BOOK_PATH_BYTES = 255;
 constexpr size_t BLE_DOWNLOAD_CHUNK_BYTES = 160;
 constexpr size_t BLE_DOWNLOAD_CHUNK_BYTES_MIN = 20;
 constexpr size_t BLE_DOWNLOAD_CHUNK_BYTES_MAX = BLE_DOWNLOAD_CHUNK_BYTES;
@@ -165,6 +190,122 @@ bool isSafeBleFirmwareName(const std::string& value) {
   return isSafeBleFileName(value) && endsWithSuffix(value, ".bin", BIN_SUFFIX_LEN);
 }
 
+// A path relative to the books root, as the `library` listing emits it
+// ("Sub/Folder/Book.epub"). Deliberately more permissive than
+// isSafeBleFileName(): that guards a name the client invents for a new file,
+// whereas this must accept every name already on the card, including UTF-8 and
+// the punctuation real book titles carry. What it does not accept is anything
+// that could leave /Books or name a hidden entry.
+bool isSafeBleBookRelativePath(const std::string& value) {
+  if (value.empty() || value.length() > MAX_BOOK_PATH_BYTES) return false;
+  size_t segmentStart = 0;
+  for (size_t i = 0; i <= value.size(); i++) {
+    if (i < value.size()) {
+      const auto uc = static_cast<unsigned char>(value[i]);
+      if (uc < 0x20 || uc == 0x7F) return false;  // control characters
+      if (value[i] == '\\') return false;         // never a separator here; confuses hosts
+      if (value[i] != '/') continue;
+    }
+    // An empty segment is a leading '/', a trailing '/', or "//".
+    if (i == segmentStart) return false;
+    // Rejects "." and ".." -- which would walk out of the books root -- along
+    // with the reader's own dot-caches and host-OS litter, none of which the
+    // listing ever emits.
+    if (value[segmentStart] == '.') return false;
+    segmentStart = i + 1;
+  }
+  return true;
+}
+
+// Pulls one top-level object at a time out of a JSON array held in a file.
+//
+// The batch is parsed incrementally on purpose: a few thousand entries is
+// hundreds of kilobytes, and a reading session has no such heap to spare. Only
+// the current object's text is in RAM, capped at MAX_PROGRESS_ENTRY_BYTES, and
+// ArduinoJson is handed that one object rather than the document.
+//
+// This is a brace matcher, not a JSON parser -- it only needs to find where each
+// object ends, which means tracking strings and their escapes so a '}' inside a
+// filename does not end the object early. Everything inside is then parsed
+// properly by ArduinoJson, which is what rejects malformed entries.
+class ProgressBatchReader {
+ public:
+  enum class Next { OBJECT, END, PARSE_ERROR };
+
+  explicit ProgressBatchReader(HalFile& file) : file_(file) {}
+
+  Next next(std::string& objectText) {
+    objectText.clear();
+    if (!sawArrayStart_) {
+      if (skipWhitespace() != '[') return Next::PARSE_ERROR;
+      sawArrayStart_ = true;
+    }
+    int c = skipWhitespace();
+    if (c == ']') return Next::END;
+    if (!firstEntry_) {
+      if (c != ',') return Next::PARSE_ERROR;
+      c = skipWhitespace();
+    }
+    firstEntry_ = false;
+    if (c != '{') return Next::PARSE_ERROR;
+
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    while (true) {
+      if (objectText.size() >= MAX_PROGRESS_ENTRY_BYTES) return Next::PARSE_ERROR;
+      objectText.push_back(static_cast<char>(c));
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == '"') {
+          inString = false;
+        }
+      } else if (c == '"') {
+        inString = true;
+      } else if (c == '{' || c == '[') {
+        depth++;
+      } else if (c == '}' || c == ']') {
+        depth--;
+        if (depth == 0) return Next::OBJECT;
+      }
+      c = readByte();
+      if (c < 0) return Next::PARSE_ERROR;
+    }
+  }
+
+ private:
+  // Buffered: reading a few hundred entries one SD call per byte would be
+  // minutes of SPI overhead.
+  int readByte() {
+    if (bufferPos_ >= bufferLen_) {
+      const int read = file_.read(buffer_.data(), buffer_.size());
+      if (read <= 0) return -1;
+      bufferLen_ = static_cast<size_t>(read);
+      bufferPos_ = 0;
+    }
+    return buffer_[bufferPos_++];
+  }
+
+  int skipWhitespace() {
+    while (true) {
+      const int c = readByte();
+      if (c < 0) return -1;
+      if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+      return c;
+    }
+  }
+
+  HalFile& file_;
+  std::array<uint8_t, 256> buffer_ = {};
+  size_t bufferLen_ = 0;
+  size_t bufferPos_ = 0;
+  bool sawArrayStart_ = false;
+  bool firstEntry_ = true;
+};
+
 std::string transferKindName(const BleTransferActivity::TransferKind kind) {
   switch (kind) {
     case BleTransferActivity::TransferKind::BOOK:
@@ -173,6 +314,10 @@ std::string transferKindName(const BleTransferActivity::TransferKind kind) {
       return "bmp";
     case BleTransferActivity::TransferKind::FIRMWARE:
       return "firmware";
+    case BleTransferActivity::TransferKind::PROGRESS:
+      return "progress";
+    case BleTransferActivity::TransferKind::PROGRESS_RESULT:
+      return "progress_result";
     case BleTransferActivity::TransferKind::CRASH_REPORT:
       return "crash_report";
     case BleTransferActivity::TransferKind::LIBRARY:
@@ -416,8 +561,11 @@ void BleTransferActivity::onEnter() {
 void BleTransferActivity::onExit() {
   Activity::onExit();
   resetTransfer(true);
-  // The staged library listing is a scratch file for one session only.
+  // The staged library listing, the uploaded progress batch and its result
+  // document are scratch files for one session only.
   if (Storage.exists(LIBRARY_INDEX_PATH)) Storage.remove(LIBRARY_INDEX_PATH);
+  if (Storage.exists(PROGRESS_BATCH_PATH)) Storage.remove(PROGRESS_BATCH_PATH);
+  if (Storage.exists(PROGRESS_RESULT_PATH)) Storage.remove(PROGRESS_RESULT_PATH);
   if (ble_) {
     ble_->end();
     ble_.reset();
@@ -642,6 +790,31 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     return;
   }
 
+  if (op == "set_time") {
+    // There is no NTP in a build without the network stack, so this is the only
+    // way the device learns the date -- and without a date it cannot timestamp
+    // its own saves, which is what makes progress conflicts resolvable at all.
+    if (!halClock.isAvailable()) {
+      setError("no clock on this device");
+      return;
+    }
+    const int64_t epoch = doc["epoch"] | static_cast<int64_t>(0);
+    if (epoch < static_cast<int64_t>(HalClock::MIN_VALID_EPOCH) ||
+        epoch >= static_cast<int64_t>(HalClock::MAX_VALID_EPOCH)) {
+      setError("invalid epoch");
+      return;
+    }
+    if (!halClock.setEpoch(static_cast<uint32_t>(epoch))) {
+      setError("could not set clock");
+      return;
+    }
+    // No state change: the acknowledgement is `device_time` in the status the
+    // client is already subscribed to, which is also how it detects drift.
+    statusDirty_ = true;
+    requestUpdate();
+    return;
+  }
+
   if (op == "start_put") {
     resetTransfer(true);
 
@@ -707,6 +880,21 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
         setError("exists");
         return;
       }
+    } else if (kind == "progress") {
+      // The batch has no user-facing name and never lands on the shelf: it is
+      // staged at a fixed scratch path, parsed on commit, and deleted.
+      if (expectedSize_ == 0 || expectedSize_ > MAX_BLE_PROGRESS_BYTES) {
+        setError("invalid progress size");
+        return;
+      }
+      if (!Storage.ensureDirectoryExists(CROSSPOINT_ROOT)) {
+        setError("could not create data directory");
+        return;
+      }
+      transferKind_ = TransferKind::PROGRESS;
+      fileName_ = PROGRESS_BATCH_NAME;
+      partPath_ = PROGRESS_BATCH_PART_PATH;
+      finalPath_ = PROGRESS_BATCH_PATH;
     } else if (kind == "firmware") {
       if (!isSafeBleFirmwareName(fileName_)) {
         setError("unsafe firmware filename");
@@ -801,6 +989,10 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     }
     if (kind == "library") {
       startLibraryDownload(static_cast<size_t>(offsetValue), static_cast<size_t>(chunkSizeValue));
+      return;
+    }
+    if (kind == "progress_result") {
+      startProgressResultDownload(static_cast<size_t>(offsetValue), static_cast<size_t>(chunkSizeValue));
       return;
     }
     setError("unsupported transfer kind");
@@ -914,9 +1106,9 @@ void BleTransferActivity::processCommit() {
     resetTransfer(true);
     return;
   }
-  if (transferKind_ == TransferKind::FIRMWARE && Storage.exists(finalPath_.c_str()) &&
-      !Storage.remove(finalPath_.c_str())) {
-    setError("could not replace existing firmware");
+  if ((transferKind_ == TransferKind::FIRMWARE || transferKind_ == TransferKind::PROGRESS) &&
+      Storage.exists(finalPath_.c_str()) && !Storage.remove(finalPath_.c_str())) {
+    setError("could not replace staged upload");
     resetTransfer(true);
     return;
   }
@@ -931,6 +1123,13 @@ void BleTransferActivity::processCommit() {
     savedPath_ = finalPath_;
     if (transferKind_ == TransferKind::BOOK) clearBookCache(savedPath_);
     completeFinalState(State::SAVED);
+    return;
+  }
+
+  if (transferKind_ == TransferKind::PROGRESS) {
+    // Only now that the whole batch is on disk and its SHA-256 checks out does
+    // anything get written underneath a book.
+    processProgressBatch();
     return;
   }
 
@@ -1017,6 +1216,114 @@ void BleTransferActivity::startLibraryDownload(const size_t offset, const size_t
     return;
   }
   startFileDownload(LIBRARY_INDEX_PATH, LIBRARY_INDEX_NAME, TransferKind::LIBRARY, offset, chunkSize);
+}
+
+void BleTransferActivity::startProgressResultDownload(const size_t offset, const size_t chunkSize) {
+  startFileDownload(PROGRESS_RESULT_PATH, PROGRESS_RESULT_NAME, TransferKind::PROGRESS_RESULT, offset, chunkSize);
+}
+
+void BleTransferActivity::processProgressBatch() {
+  progressEntries_ = 0;
+  progressApplied_ = 0;
+
+  // No open-book hazard to guard against here. Reaching this screen goes through
+  // ActivityManager::goToBluetoothTransfer(), which calls replaceActivity()
+  // (ActivityManager.cpp) -- that drops the current activity AND the whole
+  // stack, so a reader has already run onExit(), written its final progress.bin
+  // and been destroyed before BLE advertising ever starts. There is no
+  // in-memory reader position for these writes to fight, and when the user next
+  // opens the book the reader loads the position from disk, which is what was
+  // just written. Nothing is deferred and nothing is rejected on this account.
+  HalFile in;
+  if (!Storage.openFileForRead("BLE", PROGRESS_BATCH_PATH, in)) {
+    setError("could not read progress batch");
+    resetTransfer(true);
+    return;
+  }
+  if (Storage.exists(PROGRESS_RESULT_PATH)) Storage.remove(PROGRESS_RESULT_PATH);
+  HalFile out;
+  if (!Storage.openFileForWrite("BLE", PROGRESS_RESULT_PATH, out)) {
+    in.close();
+    setError("could not stage progress results");
+    resetTransfer(true);
+    return;
+  }
+
+  ProgressBatchReader reader(in);
+  std::string objectText;
+  bool ok = out.print("[") == 1;
+  bool first = true;
+  bool malformed = false;
+
+  while (ok) {
+    const auto next = reader.next(objectText);
+    if (next == ProgressBatchReader::Next::PARSE_ERROR) {
+      malformed = true;
+      break;
+    }
+    if (next == ProgressBatchReader::Next::END) break;
+    if (progressEntries_ >= MAX_PROGRESS_ENTRIES) {
+      malformed = true;
+      break;
+    }
+    progressEntries_++;
+    // Each entry is several SD operations (existence check, sidecar read,
+    // atomic write); a large batch would otherwise outlast the watchdog window.
+    resetTaskWatchdogIfSubscribed();
+
+    std::string filename;
+    auto result = BookProgressSync::ApplyResult::INVALID;
+    JsonDocument entry;
+    if (deserializeJson(entry, objectText) == DeserializationError::Ok) {
+      filename = entry["filename"] | "";
+      const std::string location = toLowerAscii(entry["location"] | "");
+      const int64_t timestamp = entry["timestamp"] | static_cast<int64_t>(0);
+      // One bad entry costs that entry only. A book the phone knows about but
+      // this card does not is the ordinary case, not a failed batch.
+      if (isSafeBleBookRelativePath(filename) && timestamp > 0 &&
+          timestamp <= static_cast<int64_t>(UINT32_MAX)) {
+        result = BookProgressSync::applyProgress(BOOKS_ROOT, filename, location,
+                                                 static_cast<uint32_t>(timestamp));
+      }
+    }
+    if (result == BookProgressSync::ApplyResult::APPLIED) progressApplied_++;
+
+    JsonDocument resultDoc;
+    // Echoed back so the client can match outcomes to entries without relying on
+    // array position; empty when the entry was too malformed to name a book.
+    resultDoc["filename"] = filename;
+    resultDoc["result"] = BookProgressSync::applyResultName(result);
+    String json;
+    serializeJson(resultDoc, json);
+    if (!first && out.print(",") != 1) {
+      ok = false;
+      break;
+    }
+    first = false;
+    if (out.print(json) != json.length()) ok = false;
+  }
+
+  if (ok) ok = out.print("]") == 1;
+  out.flush();
+  out.close();
+  in.close();
+  // The uploaded batch is scratch; the result document stays until the transfer
+  // screen closes so the client can fetch it.
+  Storage.remove(PROGRESS_BATCH_PATH);
+  removePartOnExit_ = false;
+
+  if (!ok || malformed) {
+    Storage.remove(PROGRESS_RESULT_PATH);
+    progressEntries_ = 0;
+    progressApplied_ = 0;
+    setError(malformed ? "malformed progress batch" : "could not write progress results");
+    resetTransfer(true);
+    return;
+  }
+
+  LOG_INF("BLE", "Progress batch: %u entries, %u applied", static_cast<unsigned>(progressEntries_),
+          static_cast<unsigned>(progressApplied_));
+  completeFinalState(State::SAVED);
 }
 
 void BleTransferActivity::pumpDownload() {
@@ -1273,9 +1580,17 @@ std::string BleTransferActivity::buildStatusJson() const {
   uploadKinds.add("book");
   uploadKinds.add("bmp");
   uploadKinds.add("firmware");
+  uploadKinds.add("progress");
   JsonArray downloadKinds = doc["download_kinds"].to<JsonArray>();
   downloadKinds.add("crash_report");
   downloadKinds.add("library");
+  downloadKinds.add("progress_result");
+  doc["clock_supported"] = halClock.isAvailable();
+  // Omitted, never zeroed, when the device does not know the time: the client
+  // uses its absence to decide it must send `set_time`, and its value to notice
+  // drift. A `0` here would read as a real 1970 instant.
+  uint32_t deviceEpoch = 0;
+  if (halClock.getEpoch(deviceEpoch)) doc["device_time"] = deviceEpoch;
   doc["device_id"] = deviceId_.c_str();
   doc["device_nonce"] = deviceNonce_.c_str();
   doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
@@ -1285,16 +1600,25 @@ std::string BleTransferActivity::buildStatusJson() const {
   if (expectedSize_ > 0 || state_ == State::SENDING || state_ == State::SENT) {
     const std::string kind = transferKindName(transferKind_);
     if (!kind.empty()) doc["kind"] = kind.c_str();
-    if (state_ == State::SENDING || state_ == State::SENT) {
+    if (state_ == State::SAVED && transferKind_ == TransferKind::PROGRESS) {
+      // A finished batch reports its outcome, not its byte count. Kept this
+      // short deliberately: a status notification carries at most ATT_MTU-3
+      // bytes, and the per-entry outcomes are a `progress_result` download
+      // precisely because a shelf-sized array would be truncated in one.
+      doc["entries"] = progressEntries_;
+      doc["applied"] = progressApplied_;
+    } else if (state_ == State::SENDING || state_ == State::SENT) {
       doc["sent"] = sentBytes_;
+      doc["size"] = expectedSize_;
     } else if (state_ == State::UPDATING || state_ == State::RESTARTING) {
       doc["written"] = flashWrittenBytes_;
+      doc["size"] = expectedSize_;
     } else {
       doc["received"] = receivedBytes_;
       if (uploadResumable_) doc["resumable"] = true;
       doc["ack_bytes"] = uploadAckBytes_;
+      doc["size"] = expectedSize_;
     }
-    doc["size"] = expectedSize_;
   }
   if (state_ == State::SAVED && !savedPath_.empty()) {
     doc["name"] = fileName_.c_str();
@@ -1362,8 +1686,16 @@ void BleTransferActivity::render(RenderLock&&) {
       secondary = fileName_;
       break;
     case State::SAVED:
-      primary = tr(STR_BLE_TRANSFER_SAVED);
-      secondary = savedPath_.empty() ? fileName_ : savedPath_;
+      if (transferKind_ == TransferKind::PROGRESS) {
+        primary = tr(STR_BLE_TRANSFER_PROGRESS_SAVED);
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%u / %u", static_cast<unsigned>(progressApplied_),
+                 static_cast<unsigned>(progressEntries_));
+        secondary = buffer;
+      } else {
+        primary = tr(STR_BLE_TRANSFER_SAVED);
+        secondary = savedPath_.empty() ? fileName_ : savedPath_;
+      }
       break;
     case State::RESTARTING:
       primary = tr(STR_BLE_TRANSFER_RESTARTING);
@@ -1373,8 +1705,13 @@ void BleTransferActivity::render(RenderLock&&) {
       primary = tr(STR_BLE_TRANSFER_PREPARING_LIBRARY);
       break;
     case State::SENDING: {
-      primary =
-          transferKind_ == TransferKind::LIBRARY ? tr(STR_BLE_TRANSFER_SENDING_LIBRARY) : tr(STR_BLE_TRANSFER_SENDING);
+      if (transferKind_ == TransferKind::LIBRARY) {
+        primary = tr(STR_BLE_TRANSFER_SENDING_LIBRARY);
+      } else if (transferKind_ == TransferKind::PROGRESS_RESULT) {
+        primary = tr(STR_BLE_TRANSFER_SENDING_RESULTS);
+      } else {
+        primary = tr(STR_BLE_TRANSFER_SENDING);
+      }
       char buffer[48];
       snprintf(buffer, sizeof(buffer), "%u / %u bytes", static_cast<unsigned>(sentBytes_),
                static_cast<unsigned>(expectedSize_));
@@ -1382,7 +1719,13 @@ void BleTransferActivity::render(RenderLock&&) {
       break;
     }
     case State::SENT:
-      primary = transferKind_ == TransferKind::LIBRARY ? tr(STR_BLE_TRANSFER_LIBRARY_SENT) : tr(STR_BLE_TRANSFER_SENT);
+      if (transferKind_ == TransferKind::LIBRARY) {
+        primary = tr(STR_BLE_TRANSFER_LIBRARY_SENT);
+      } else if (transferKind_ == TransferKind::PROGRESS_RESULT) {
+        primary = tr(STR_BLE_TRANSFER_RESULTS_SENT);
+      } else {
+        primary = tr(STR_BLE_TRANSFER_SENT);
+      }
       secondary = fileName_;
       break;
     case State::ERROR:
