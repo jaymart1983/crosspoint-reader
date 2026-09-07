@@ -5,8 +5,8 @@
 #include "components/UiAppHost.h"
 #include "util/ButtonNavigator.h"
 
-// Top-anchored control center opened by a status-bar tap or by the Left+Right
-// side-key chord (iOS Control Center style): a grabber, the frontlight
+// Top-anchored control center opened by a status-bar tap or by a power-button
+// tap (iOS Control Center style): a grabber, the frontlight
 // brightness/warmth sliders (on boards with a light), and a grid of
 // quick-setting tiles — night mode, ghost-cleanup refresh, reading orientation,
 // frontlight, touchscreen on/off, sleep, settings and home. The frontlight
@@ -17,9 +17,10 @@
 //
 // This panel is also the recovery screen for a device whose touchscreen has
 // been switched off — the Touch tile is the only way back on — so it has to be
-// fully workable from buttons alone: the chord opens and closes it, the
-// navigation keys move a tile cursor, and Confirm (a power tap on the X4 Pro)
-// activates the focused tile.
+// fully workable from buttons alone: a power tap opens it and a ~1 s power hold
+// closes it, the navigation keys move a tile cursor, and Confirm (a hold on the
+// Right side key on the X4 Pro, which MappedInputManager folds into Confirm
+// outside a book) activates the focused tile.
 class FrontlightPanelActivity final : public Activity, private UiAppHost {
   ButtonNavigator buttonNavigator;
 
@@ -62,7 +63,7 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // Only meaningful (and only drawn) while the touchscreen is switched off.
   int focusedTile = -1;
   // The sheet is a portrait card sized against the whole screen height, and it
-  // can now be opened from the reader (the Left+Right chord works everywhere),
+  // can now be opened from the reader (a power tap works everywhere),
   // which may have the renderer turned. So the panel forces portrait for as long
   // as it is up and puts the frame back exactly as it found it on the way out --
   // a rotated reader underneath re-applies its own orientation on its next

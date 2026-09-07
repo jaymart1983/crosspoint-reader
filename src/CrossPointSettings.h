@@ -142,37 +142,64 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     FORCE_REFRESH = 3,
     FOOTNOTES = 4,
     PWR_CONFIRM = 5,
+    // Opens the control centre. The X4 Pro's default: with Select moved onto a
+    // side-key hold, the power tap is free to carry the one action that has to
+    // reach every screen, the reader page included.
+    PWR_CONTROL_CENTER = 6,
     SHORT_PWRBTN_COUNT
   };
 
   // --- Power-button gesture timing -------------------------------------------
-  // Boards that answer usesPowerGestures() carry two power-button gestures,
-  // told apart only by how long the button was held:
+  // Boards that answer usesPowerGestures() carry three power-button gestures,
+  // told apart only by timing. The power button is the menu key, everywhere,
+  // the reader page included:
   //
-  //   release <= POWER_CLICK_MAX_HOLD_MS   a tap -> the short-click action
-  //                                        (Select by default)
-  //   release >= POWER_BACK_HOLD_MS        Back
+  //   tap    (release <= POWER_CLICK_MAX_HOLD_MS)  the short-click action,
+  //                                                Control Centre by default
+  //   double tap (two taps <= POWER_DOUBLE_TAP_MS  frontlight on/off
+  //               apart)
+  //   hold   (release >= POWER_MENU_HOLD_MS)       close the control centre
   //
-  // Both fire on the RELEASE, so a tap is dispatched the instant the finger
-  // lifts -- there is no second gesture left that a tap could turn out to be
-  // the first half of, so nothing has to be parked and waited out.
+  // WHY THE TAP IS PARKED. The double tap is back, so a tap can no longer be
+  // dispatched on its own release -- it might turn out to be the first half of
+  // a double tap. It is parked and published only once the double-tap window
+  // closes, which costs up to POWER_DOUBLE_TAP_MS of latency.
   //
-  // The band between the two is deliberately inert: that is where a slow tap
-  // and a short hold are indistinguishable, and doing nothing costs the user
-  // less than a wrong Back. With only these two gestures left it can be narrow
-  // -- 700 ms is already a hold by any reasonable reading, so the ceiling sits
-  // just under the Back floor rather than the 350 ms the four-gesture scheme
-  // needed to leave room for a double tap.
+  // That cost was rejected twice before, when the tap was Select (686f90d) and
+  // when it was a page turn: those are the two actions a reader performs
+  // hundreds of times an hour, on a rhythm, and 300 ms of dead air on every one
+  // of them is felt as the device being slow. It is accepted HERE because the
+  // action the tap now carries is different in kind -- opening the control
+  // centre is an occasional, deliberate act, and the panel it opens costs a
+  // ~487 ms full panel render anyway, so the parking window is spent inside a
+  // transition the user is already waiting on rather than in front of one they
+  // are not. The window is kept at the short end of the usual 250-350 ms range
+  // for the same reason it was before: it is pure cost.
+  //
+  // The band between the tap ceiling and the hold floor is deliberately inert:
+  // that is where a slow tap and a short hold are indistinguishable, and doing
+  // nothing costs the user less than a wrong open-or-close. 700 ms already
+  // reads as a hold, so the ceiling sits just under the hold floor.
   static constexpr unsigned long POWER_CLICK_MAX_HOLD_MS = 700;
-  static constexpr unsigned long POWER_BACK_HOLD_MS = 1000;
+  static constexpr unsigned long POWER_MENU_HOLD_MS = 1000;
+  static constexpr unsigned long POWER_DOUBLE_TAP_MS = 300;
 
-  // True on boards whose power button carries the two-gesture scheme above.
-  // The X4 Pro has no physical Back or Confirm key -- touch plus the power
-  // button is the whole input surface -- so the power button has to carry them.
-  // Boards with real Back/Confirm keys keep the historical short-press/long-
-  // press pair untouched. Sleep is NOT one of these gestures: it lives on the
-  // control centre's Sleep tile, which leaves the whole hold range above 1 s to
-  // Back alone.
+  // --- Side-key long press -----------------------------------------------------
+  // Out of a book only (see MappedInputManager::setInBookContext): hold Left for
+  // Back, hold Right for Select. 600 ms rather than the usual 500: a sloppy tap
+  // on a list row is common, and a stray Back or Select costs the user more than
+  // having to hold a little longer.
+  static constexpr unsigned long SIDE_LONG_PRESS_MS = 600;
+
+  // True on boards whose whole physical input surface is the power button and
+  // the two side keys: no Back key, no Confirm key, no d-pad. The X4 Pro. Those
+  // boards run the power-gesture scheme above AND the out-of-book side-key long
+  // presses, because between them that is the only place Back and Select can
+  // live. Boards with real Back/Confirm keys keep the historical
+  // short-press/long-press pair untouched.
+  //
+  // Sleep is not one of these gestures: it lives on the control centre's Sleep
+  // tile, which is what leaves the whole hold range above 1 s free.
   static bool usesPowerGestures() { return BoardConfig::isX4Pro(); }
 
   // Long-press Confirm action while reading an EPUB. The setting cycles through these values.
@@ -261,12 +288,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = 1;
-  // Short power button click behaviour. On the X4 Pro a single tap confirms:
-  // there is no physical Confirm key, and the frontlight now lives on the power
-  // DOUBLE tap again rather than competing for the single one. Compile-time
-  // gated, not BoardConfig-gated: this is a default member initialiser on a
-  // global, so it must not depend on another global's initialisation order.
-  uint8_t shortPwrBtn = FREEINK_DEVICE_X4PRO ? PWR_CONFIRM : IGNORE;
+  // Short power button click behaviour. On the X4 Pro a single tap opens the
+  // control centre: Select has moved to a Right side-key hold, so the power tap
+  // is free for the one action that has to be reachable from every screen
+  // including the reader page. Compile-time gated, not BoardConfig-gated: this
+  // is a default member initialiser on a global, so it must not depend on
+  // another global's initialisation order.
+  uint8_t shortPwrBtn = FREEINK_DEVICE_X4PRO ? PWR_CONTROL_CENTER : IGNORE;
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
   uint8_t orientation = PORTRAIT;
@@ -380,9 +408,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   //
   // SLEEP mode means "a short click sleeps", so the threshold drops to
   // effectively nothing. Otherwise the historical 400 ms applies. Boards on the
-  // gesture scheme do not reach this at all -- their power hold is Back, and
-  // main.cpp skips the hold-to-sleep path for them entirely unless the user has
-  // explicitly bound the power button to Sleep.
+  // gesture scheme do not reach this at all -- their power hold closes the
+  // control centre, and main.cpp skips the hold-to-sleep path for them entirely
+  // unless the user has explicitly bound the power button to Sleep.
   uint16_t getPowerButtonDuration() const {
     if (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) return 10;
     return 400;

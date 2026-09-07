@@ -180,12 +180,13 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
 }
 
 // Short power-button actions, in enum order (CrossPointSettings::SHORT_PWRBTN).
-// PWR_CONFIRM only makes sense where there is no physical Confirm key, and it
-// sits at a fixed index, so the list is truncated from the end rather than
-// reordered.
+// PWR_CONFIRM and PWR_CONTROL_CENTER only make sense where there is no physical
+// Confirm key, and they sit at fixed indices, so the list is truncated from the
+// end rather than reordered.
 inline std::vector<StrId> buildShortPwrBtnValues() {
-  static constexpr StrId VALUES[] = {StrId::STR_IGNORE,        StrId::STR_SLEEP,     StrId::STR_PAGE_TURN,
-                                     StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES, StrId::STR_CONFIRM};
+  static constexpr StrId VALUES[] = {StrId::STR_IGNORE,     StrId::STR_SLEEP,   StrId::STR_PAGE_TURN,
+                                     StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES, StrId::STR_CONFIRM,
+                                     StrId::STR_CONTROL_CENTER};
   const size_t count =
       BoardConfig::hasTouch() ? std::size(VALUES) : static_cast<size_t>(CrossPointSettings::PWR_CONFIRM);
   return {VALUES, VALUES + count};
@@ -341,9 +342,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         // nullptr key keeps it out of settings.json and out of the web API for
         // the same reason. Two values, so selecting it flips in place instead of
         // opening an option popup. The control centre's Touch tile drives this
-        // same gate; if it is switched off with no other way back in, press the
-        // two side keys TOGETHER to open the control centre and turn it back on
-        // (see MappedInputManager::updateSideCombo).
+        // same gate; if it is switched off with no other way back in, TAP the
+        // power button to open the control centre and turn it back on (see
+        // CrossPointSettings::PWR_CONTROL_CENTER).
         SettingInfo::DynamicEnum(
             StrId::STR_TOUCHSCREEN, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
             []() -> uint8_t { return MappedInputManager::isTouchInputEnabled() ? 1 : 0; },

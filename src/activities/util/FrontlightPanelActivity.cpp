@@ -234,9 +234,9 @@ void FrontlightPanelActivity::runTile(const int id) {
     case TILE_SETTINGS:
     case TILE_HOME:
       // Both are portrait screens, so the frame must NOT be put back the way the
-      // panel found it: the chord can open this panel over a reader that has the
-      // renderer turned, and restoring that on the way out would draw Settings
-      // or Home rotated.
+      // panel found it: a power tap can open this panel over a reader that has
+      // the renderer turned, and restoring that on the way out would draw
+      // Settings or Home rotated.
       savedOrientation = GfxRenderer::Orientation::Portrait;
       if (id == TILE_SETTINGS) {
         activityManager.goToSettings();
@@ -262,9 +262,9 @@ void FrontlightPanelActivity::runTile(const int id) {
       // SETTINGS.touchReaderControls, which only governs the reader's page-turn
       // tap zones and is what this tile used to toggle (hence "toggling it did
       // nothing"). Runtime-only and never persisted, so a reboot or a wake
-      // always brings the glass back; the Left+Right chord is the way back
-      // sooner. Switching it off from here hands the panel straight to the
-      // button cursor, so the screen that owns the switch stays usable.
+      // always brings the glass back; a power tap is the way back sooner.
+      // Switching it off from here hands the panel straight to the button
+      // cursor, so the screen that owns the switch stays usable.
       MappedInputManager::setTouchInputEnabled(!MappedInputManager::isTouchInputEnabled());
       LOG_INF("TOUCH", "Touchscreen %s from the control centre",
               MappedInputManager::isTouchInputEnabled() ? "enabled" : "disabled");
@@ -360,13 +360,14 @@ void FrontlightPanelActivity::loop() {
   // Frontlight tile still covers on/off, which is the half of the light that
   // matters when you cannot see a slider to drag.
   if (buttonNavActive()) {
-    // Confirm covers the X4 Pro's power tap through SHORT_PWRBTN::PWR_CONFIRM,
-    // its default. The raw power click is accepted as well so this screen still
-    // activates a tile when the short-click action has been bound to something
-    // else -- it is the only way back to a working touchscreen, so it must not
-    // depend on a setting the user is free to change.
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
-        mappedInput.wasReleased(MappedInputManager::Button::Power)) {
+    // Confirm covers the X4 Pro's Right side-key hold, which MappedInputManager
+    // folds into Button::Confirm outside a book. That is hardwired rather than
+    // settings-driven, which matters here: this panel is the only way back to a
+    // working touchscreen, so activating a tile must not depend on a binding the
+    // user is free to change. The raw power click is deliberately NOT accepted
+    // any more -- a power tap opens this panel, so treating it as "activate the
+    // focused tile" would fire a tile on the way in.
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       if (focusedTile >= 0 && focusedTile < tileCount) runTile(tileIds[focusedTile]);
       return;
     }

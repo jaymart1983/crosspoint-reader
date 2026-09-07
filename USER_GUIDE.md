@@ -75,8 +75,8 @@ Alternatively, while reading a book, press the **Confirm** button to open the re
 
 The X4 Pro has a built-in frontlight with adjustable brightness and warmth. It is controlled from a swipe panel rather than the Settings menu:
 
-* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen — or press the **Left and Right side keys together**, which works from any screen including while reading. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, **Frontlight**, **Touch**, **Sleep**, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
-* **Quick toggle:** The **Frontlight** tile in the control centre turns the light on or off in one tap.
+* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen — or **tap the Power button**, which works from any screen including while reading. A **~1 second hold** on the Power button closes it again. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, **Frontlight**, **Touch**, **Sleep**, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
+* **Quick toggle:** The **Frontlight** tile in the control centre turns the light on or off in one tap, and so does a **double tap of the Power button** from anywhere.
 
 > [!NOTE]
 > Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the control centre is the only place to adjust them.
@@ -94,28 +94,61 @@ In the **[Controls Settings](#363-controls)** you can configure the power button
 
 To reboot the device (for example after a firmware update or if it's frozen), press and release the Reset button, and then quickly press and hold the Power button for a few seconds.
 
-### Power Button Gestures (X4 Pro)
+### Button Gestures (X4 Pro)
 
-The X4 Pro has no physical Back or Confirm key, so its Power button carries the
-two roles they would have had:
+The X4 Pro's whole physical input surface is the Power button and the two side
+keys, so what a side key does depends on where you are.
+
+**The Power button, everywhere — including while reading:**
 
 | Gesture | Action |
 | --- | --- |
-| Tap | Select / confirm |
-| Hold ~1 second | Back |
+| Tap | Open the control centre |
+| Hold ~1 second | Close the control centre |
+| Double tap | Frontlight on / off |
 
-Both happen when you lift your finger, so a tap selects immediately. Holding for
-somewhere between the two — roughly three quarters of a second — deliberately
-does nothing: a slow tap and a short hold cannot be told apart there, and a Back
-you did not ask for is worse than nothing happening.
+Because a double tap exists, a single tap has to wait about a third of a second
+to be sure no second tap is coming. You will notice it; it is deliberate. That
+delay was refused for page turns and for Select, which you do constantly and on
+a rhythm, but opening the control centre is an occasional thing and the panel
+takes about half a second to draw anyway, so the wait is spent inside a
+transition you were already waiting for.
 
-The Power button no longer sleeps the device. **Sleep** is a tile in the control
-centre instead, which is what leaves the whole "held" range to Back.
+Holding for somewhere between the two — roughly three quarters of a second —
+deliberately does nothing: a slow tap and a short hold cannot be told apart
+there, and a menu opening or closing when you did not ask is worse than nothing
+happening.
 
-The two side keys are page navigation: **Left turns the page up (back)** and
-**Right turns the page down (forward)**. They work whether or not the
-touchscreen is switched on. Pressed **together** they open and close the control
-centre.
+The Power button does not sleep the device. **Sleep** is a tile in the control
+centre instead.
+
+**The side keys, while reading a book:**
+
+| Key | Action |
+| --- | --- |
+| Left | Page back |
+| Right | Page forward |
+
+That is all they do in a book. There is no hold action on either key while a
+page is on screen, so you can lean on them freely, and a page turn happens the
+moment you press — not when you let go.
+
+**The side keys, everywhere else** (Home, Browse Files, menus, Settings, the
+control centre):
+
+| Gesture | Action |
+| --- | --- |
+| Left | Previous item |
+| Right | Next item |
+| Hold Left ~0.6 second | Back |
+| Hold Right ~0.6 second | Select |
+
+Off the reading page the two keys have to carry Back and Select as well, which
+means a step only lands when you lift your finger — until then it might still
+turn out to be a hold. Holding a key to scroll a long list quickly is not
+available on these screens for the same reason.
+
+The side keys work whether or not the touchscreen is switched on.
 
 ### Turning the Touchscreen Off
 
@@ -124,11 +157,10 @@ resting a palm on the screen while reading. (**Settings -> Controls ->
 Touchscreen** is the same switch.) The side keys and the Power-button gestures
 above keep working, so the device stays usable.
 
-With touch off, the control centre becomes a button-driven menu: press **Left
-and Right together** to open it, use the side keys to move the highlight from
-tile to tile, and **tap Power** to select. The Touch tile turns the glass back
-on. In this mode the side keys move the highlight rather than stepping
-brightness.
+With touch off, the control centre becomes a button-driven menu: **tap Power**
+to open it, use the side keys to move the highlight from tile to tile, and
+**hold Right** to select. The Touch tile turns the glass back on. In this mode
+the side keys move the highlight rather than stepping brightness.
 
 This is deliberately not saved: the touchscreen always comes back on after a
 reboot or a wake, so it can never lock you out.
@@ -347,6 +379,8 @@ The Settings screen allows you to configure the device's behavior. There are a f
   - "Page Turn" - A short press in reading mode turns to the next page; a long press turns the device off
   - "Footnotes" - A short press in reading mode opens the footnotes submenu; if only one footnote is present on the page, the referenced page is opened directly. The short press on the power button can be used to select the footnote in the submenu, and to go back to the original page after finish reading the footnote (like the back button).
   - "Refresh" - A short press triggers a manual full-screen refresh, useful for clearing ghosting
+  - "Confirm" - A short press acts as Confirm / Select (touch devices only, which have no Confirm key)
+  - "Control Centre" (default on the X4 Pro) - A short press opens the control centre from any screen, including while reading (touch devices only)
 - **Quick-return from footnotes**: Toggles on and off the quick return functionality from the footnotes. When the functionality it's active, a short press of the power button will act as the back button from the footnotes page.
 
 #### 3.6.4 System

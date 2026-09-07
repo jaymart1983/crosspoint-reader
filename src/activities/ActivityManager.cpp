@@ -104,20 +104,25 @@ void ActivityManager::loop() {
       return;
     }
 
-    // Control-center entry, button route: Left + Right pressed together, from
-    // ANY ordinary screen including the reader. This is the one path that does
-    // not need the glass, so it is what makes turning the touchscreen off
-    // recoverable -- the chord opens the panel, the side keys move the tile
-    // cursor and a power tap selects. MappedInputManager holds a single side
-    // press for one short window so the chord can never read as a page turn
-    // (see updateSideCombo); here it only has to be routed.
-    if (mappedInput.consumeControlCenterChord() && mappedInput.hasTouch() && currentActivity->name != "Boot" &&
-        currentActivity->name != "Sleep") {
-      if (currentActivity->name == "FrontlightPanel") {
+    // Control-center entry, button route: a POWER TAP, from any ordinary screen
+    // including the reader page. This is the one path that does not need the
+    // glass, so it is what makes turning the touchscreen off recoverable -- the
+    // tap opens the panel, the side keys move the tile cursor and a Right-key
+    // hold selects. A ~1 s power hold closes it again. Both gestures are
+    // classified in main.cpp's decoder; here they only have to be routed.
+    const bool panelUp = currentActivity->name == "FrontlightPanel";
+    const bool panelRoutable =
+        mappedInput.hasTouch() && currentActivity->name != "Boot" && currentActivity->name != "Sleep";
+    if (panelRoutable && mappedInput.consumeControlCenterClose()) {
+      // Hold closes and only closes: with nothing open it is deliberately inert,
+      // so a hold can never be the thing that opens the menu it is meant to shut.
+      if (panelUp) {
         popActivity();
-      } else {
-        pushActivity(std::make_unique<FrontlightPanelActivity>(renderer, mappedInput));
+        return;
       }
+    }
+    if (panelRoutable && mappedInput.consumeControlCenterOpen() && !panelUp) {
+      pushActivity(std::make_unique<FrontlightPanelActivity>(renderer, mappedInput));
       return;
     }
 
@@ -386,6 +391,8 @@ bool ActivityManager::isReaderActivity() const {
                      [](const auto& activity) { return activity->isReaderActivity(); }) ||
          (currentActivity && currentActivity->isReaderActivity());
 }
+
+bool ActivityManager::isReaderPageActive() const { return currentActivity && currentActivity->isReaderActivity(); }
 
 bool ActivityManager::handleForcedRefresh() { return currentActivity && currentActivity->handleForcedRefresh(); }
 

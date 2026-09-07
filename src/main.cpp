@@ -205,38 +205,82 @@ void restartToHomeAfterStorageHandoff() {
 }
 
 #if FREEINK_CAP_TOUCH
+// Flip the frontlight and persist the new on/off preference.
+static void toggleFrontlightAndPersist() {
+  if (!Frontlight.present()) return;
+  const bool lightOn = !Frontlight.isOn();
+  Frontlight.setOn(lightOn);
+  SETTINGS.frontlightOn = lightOn ? 1 : 0;
+  SETTINGS.saveToFile();
+  LOG_INF("LIGHT", "Frontlight toggled %s by power double tap", lightOn ? "on" : "off");
+}
+
 // Power-button gesture decoder for boards with no physical Back or Confirm key
-// (see CrossPointSettings::usesPowerGestures). One button, two gestures:
+// (see CrossPointSettings::usesPowerGestures). One button, three gestures, the
+// same everywhere including the reader page:
 //
-//   tap (release <= POWER_CLICK_MAX_HOLD_MS)   the configured short-click
-//                                              action, Select by default
-//   hold (release >= POWER_BACK_HOLD_MS)       Back
+//   tap        the configured short-click action, Control Centre by default
+//   double tap frontlight on/off
+//   hold ~1 s  close the control centre
 //
-// Both are decided on the RELEASE, which is the earliest moment either one is
-// knowable and -- now that the double tap and the sleep hold are gone -- also
-// the last: a tap has nothing left to wait for, so it is dispatched on the very
-// frame the finger lifts with no added latency. Sleep moved to the control
-// centre's Sleep tile and the frontlight to its own tile there, which is what
-// freed the whole hold range above 1 s for Back.
+// THE PARKED TAP. The double tap is back, so a tap can no longer be dispatched
+// on its own release: it might be the first half of one. It is parked at the
+// release and only published once POWER_DOUBLE_TAP_MS has passed with no second
+// tap, which costs up to ~300 ms of latency.
 //
-// A release inside the inert band between the click ceiling and the Back floor
-// is discarded: a slow tap and a short hold cannot be told apart there, and a
-// wrong Back costs the user more than nothing happening.
+// That latency was rejected twice in this file's history -- once when the tap
+// was Select, once when it was a page turn -- and it is accepted here, so the
+// difference is worth stating plainly. Select and page turn are rhythm actions:
+// performed hundreds of times an hour, one after another, with the user's
+// attention on the result, and a fixed 300 ms of dead air on each one is
+// experienced as the device being slow. Opening the control centre is neither
+// frequent nor rhythmic, and the panel it opens costs a ~487 ms full render, so
+// the window is spent inside a transition the user is already waiting through
+// rather than in front of one they are not. The other two bindings a tap can
+// carry (force refresh, footnotes) are occasional in the same way. PAGE_TURN
+// remains available as a binding and does pay the window -- that is the user
+// explicitly choosing it, and there is no way to have both the double tap and a
+// zero-latency tap on one button.
+//
+// A release in the inert band between the tap ceiling and the hold floor is
+// discarded: a slow tap and a short hold cannot be told apart there, and doing
+// nothing costs less than a wrong open-or-close.
 //
 // Returns true when the frame is fully consumed.
-static bool handlePowerGestureRelease() {
-  if (!CrossPointSettings::usesPowerGestures() || !gpio.wasReleased(HalGPIO::BTN_POWER)) return false;
+static bool handlePowerGestures() {
+  if (!CrossPointSettings::usesPowerGestures()) return false;
 
-  const unsigned long held = gpio.getPowerButtonHeldTime();
-  if (held <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS) {
+  // Release of the parked tap: 0 means nothing parked.
+  static unsigned long parkedTapAt = 0;
+
+  if (gpio.wasReleased(HalGPIO::BTN_POWER)) {
+    const unsigned long held = gpio.getPowerButtonHeldTime();
+    if (held <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS) {
+      if (parkedTapAt != 0 && millis() - parkedTapAt <= CrossPointSettings::POWER_DOUBLE_TAP_MS) {
+        parkedTapAt = 0;
+        toggleFrontlightAndPersist();
+        return true;  // the double tap is the whole gesture; nothing else sees it
+      }
+      parkedTapAt = millis();
+      if (parkedTapAt == 0) parkedTapAt = 1;  // millis() rollover: 0 is the "nothing parked" sentinel
+      return true;                            // parked, not yet published
+    }
+    // A hold supersedes a tap still inside its window: opening the menu and then
+    // closing it again would be a confusing net-nothing.
+    parkedTapAt = 0;
+    if (held >= CrossPointSettings::POWER_MENU_HOLD_MS) {
+      mappedInputManager.setPowerCloseFrame(true);
+      return false;  // fall through so the panel sees the close on this frame
+    }
+    return true;  // the inert band between the tap ceiling and the hold floor
+  }
+
+  if (parkedTapAt != 0 && millis() - parkedTapAt > CrossPointSettings::POWER_DOUBLE_TAP_MS) {
+    // The window closed with no second tap, so it really was a single tap.
+    parkedTapAt = 0;
     mappedInputManager.setPowerClickFrame(true);
-    return false;  // fall through so the short-click action runs from its normal place
   }
-  if (held >= CrossPointSettings::POWER_BACK_HOLD_MS) {
-    mappedInputManager.setPowerBackFrame(true);
-    return false;  // fall through so the active activity sees Back on this frame
-  }
-  return true;  // the inert band between the click ceiling and the Back floor
+  return false;  // fall through so the short-click action runs from its normal place
 }
 #endif
 
@@ -595,6 +639,11 @@ void loop() {
   static unsigned long lastMemPrint = 0;
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
+  // The side-key scheme is context-sensitive, so the input layer has to know
+  // which context this frame is in BEFORE it classifies any edge. Inside a book
+  // the side keys are page keys and nothing else; outside it they also carry
+  // Back and Select on a hold (see MappedInputManager::setInBookContext).
+  MappedInputManager::setInBookContext(activityManager.isReaderPageActive());
   mappedInputManager.update();
 
   if (activityManager.requiresExclusiveStorageLoop()) {
@@ -688,8 +737,8 @@ void loop() {
   // The power-gesture events last exactly one frame: clear them, then let the
   // decoder republish whichever one this frame resolves.
   mappedInputManager.setPowerClickFrame(false);
-  mappedInputManager.setPowerBackFrame(false);
-  if (handlePowerGestureRelease()) return;
+  mappedInputManager.setPowerCloseFrame(false);
+  if (handlePowerGestures()) return;
 #endif
 
   // The control centre's Sleep tile, honoured here rather than in the panel so
@@ -714,9 +763,10 @@ void loop() {
   static bool powerReleasedSinceWake = false;
   if (!gpio.isPressed(HalGPIO::BTN_POWER)) powerReleasedSinceWake = true;
 
-  // Boards on the gesture scheme spend their power hold on Back, so holding the
-  // button must never sleep the device out from under it -- Sleep is a control
-  // centre tile there. An explicit Sleep binding still wins: that is the user
+  // Boards on the gesture scheme spend their power hold on closing the control
+  // centre, so holding the button must never sleep the device out from under it
+  // -- Sleep is a control centre tile there. An explicit Sleep binding still
+  // wins: that is the user
   // asking for the old behaviour back, and it takes the gesture scheme with it.
   const bool powerHoldSleeps = !CrossPointSettings::usesPowerGestures() ||
                                SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP;

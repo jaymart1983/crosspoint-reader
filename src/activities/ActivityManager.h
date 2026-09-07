@@ -107,6 +107,12 @@ class ActivityManager {
   bool preventAutoSleep() const;
   bool requiresExclusiveStorageLoop() const;
   bool isReaderActivity() const;
+  // True only when the reader PAGE itself has focus — a reader menu, popup or
+  // the control centre pushed on top makes this false while isReaderActivity()
+  // stays true. This is the "inside a book" test the input scheme keys off (see
+  // MappedInputManager::setInBookContext): those pushed screens are exactly the
+  // ones that need Back and Select on the side keys.
+  bool isReaderPageActive() const;
   bool handleForcedRefresh();
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;
