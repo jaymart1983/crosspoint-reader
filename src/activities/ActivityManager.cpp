@@ -16,6 +16,7 @@
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
+#include "home/MoreMenuActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "network/BleTransferActivity.h"
 #include "network/NetworkModeSelectionActivity.h"
@@ -295,7 +296,18 @@ void ActivityManager::goToBluetoothTransfer() {
   }
   replaceActivity(std::move(activity));
 }
+
+void ActivityManager::goToStore() {
+  auto activity = makeUniqueNoThrow<BleTransferActivity>(renderer, mappedInput, BleTransferActivity::Mode::STORE);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM: Store activity");
+    return;
+  }
+  replaceActivity(std::move(activity));
+}
 #endif
+
+void ActivityManager::goToMoreMenu() { replaceActivity(std::make_unique<MoreMenuActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
@@ -369,6 +381,10 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "BleTransfer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
+    } else if (activityName == "Store") {
+      initialMenuItem = HomeMenuItem::STORE;
+    } else if (activityName == "MoreMenu") {
+      initialMenuItem = HomeMenuItem::MORE;
     } else if (activityName == "Settings") {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
     }

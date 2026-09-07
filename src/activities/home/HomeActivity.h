@@ -3,22 +3,44 @@
 #include <vector>
 
 #include "./FileBrowserActivity.h"
+#include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 
-struct RecentBook;
 struct Rect;
 
+// The home screen is a shelf, not a menu of verbs.
+//
+// Layout, top to bottom:
+//
+//   the cover tile      the first `coverCount` books, drawn by the theme
+//                       (BaseTheme::drawRecentBookCover). How many fit is the
+//                       theme's call: 1 for Lyra and RoundedRaff, 3 for Lyra
+//                       3-Covers.
+//   book rows           every remaining book the menu band has room for
+//   Store               Task A's app-backed Calibre browser
+//   More                Browse Files / Recent Books / File Transfer / Settings
+//
+// The books come from HOME_SHELF, a cached ordering of the whole /Books tree:
+// currently reading first (most recently read of those at the very top), then
+// never-opened books newest first. It is rebuilt only when
+// BookLibraryIndex::fingerprint says the card changed, because building it opens
+// every book's metadata cache and that is seconds on a large shelf.
+//
+// WHERE THE OLD VERBS WENT. Browse Files, Recent Books, File Transfer and
+// Settings are all one row away, under More. Demoted rather than deleted: on
+// this board the control centre (a power tap, from any screen) already carries
+// Settings and Home tiles, so nothing here is the only route to anything.
 class HomeActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
-  bool recentsLoading = false;
-  bool recentsLoaded = false;
+  bool coversLoading = false;
+  bool coversLoaded = false;
   bool firstRenderDone = false;
-  // Always false on a FREEINK_CAP_NETWORK=0 build: the OPDS row simply never
-  // appears, and menuItemToIndex/indexToMenuItem below already handle its
-  // absence, so there is no second index layout to maintain.
-  bool hasOpdsServers = false;
+  // The shelf has been reconciled with the card this visit. Deferred past the
+  // first render so home paints from the cache immediately and pays for the
+  // directory walk behind an already-useful screen.
+  bool shelfChecked = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
@@ -30,50 +52,51 @@ class HomeActivity final : public Activity {
   int coverRectY = 0;
   int coverRectW = 0;
   int coverRectH = 0;
-  std::vector<RecentBook> recentBooks;
+  // The books this screen draws, in shelf order. RecentBook rather than a type
+  // of its own because the theme's cover tile takes exactly that.
+  std::vector<RecentBook> homeBooks;
+  // How many of homeBooks the theme's cover tile takes; the rest become menu
+  // rows, as many as the band has room for.
+  int coverCount = 0;
+  int bookRowCount = 0;
   const HomeMenuItem initialMenuItem;
   const bool cleanInitialRefresh;
 
-  // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
-    int i = 0;
-    if (item == HomeMenuItem::FILE_BROWSER) return i;
-    ++i;
-    if (item == HomeMenuItem::RECENTS) return i;
-    ++i;
-    if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
-    if (hasOpdsUrl) ++i;
-    if (item == HomeMenuItem::FILE_TRANSFER) return i;
-    ++i;
-    if (item == HomeMenuItem::SETTINGS_MENU) return i;
-    return 0;
-  }
-
-  // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
-    int i = 0;
-    if (idx == i++) return HomeMenuItem::FILE_BROWSER;
-    if (idx == i++) return HomeMenuItem::RECENTS;
-    if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
-    if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
-    if (idx == i) return HomeMenuItem::SETTINGS_MENU;
-    return HomeMenuItem::NONE;
-  }
-  void onSelectBook(const std::string& path);
-  void onFileBrowserOpen();
-  void onRecentsOpen();
-  void onSettingsOpen();
-  void onFileTransferOpen();
-#if FREEINK_CAP_NETWORK
-  void onOpdsBrowserOpen();
+  // The rows that always follow the books. The Store needs the phone app over
+  // BLE and nothing else -- there is no WiFi on this board -- so on a build
+  // without the BLE transfer service the row is not built at all rather than
+  // offered and refused.
+#if FREEINK_CAP_BLE_TRANSFER
+  static constexpr bool HAS_STORE = true;
+#else
+  static constexpr bool HAS_STORE = false;
 #endif
+  static constexpr int FIXED_MENU_ROWS = HAS_STORE ? 2 : 1;  // Store, More
 
-  int getMenuItemCount() const;
+  void onSelectBook(const std::string& path);
+  void onStoreOpen();
+  void onMoreOpen();
+
+  int getMenuItemCount() const { return coverCount + bookRowCount + FIXED_MENU_ROWS; }
+  // Menu rows actually drawn: the book rows and the two fixed ones, plus the
+  // theme's own Continue Reading row when it puts the cover book in the menu.
+  int renderedMenuRowCount() const;
+  // Rows the menu band can draw without running off the bottom of the screen.
+  // drawButtonMenu does not clip, so this is the caller's job.
+  int menuRowCapacity() const;
+  // Recomputes coverCount/bookRowCount from homeBooks and the current theme.
+  void layoutShelf();
   bool storeCoverBuffer();    // Store frame buffer for cover image
   bool restoreCoverBuffer();  // Restore frame buffer from stored cover
   void freeCoverBuffer();     // Free the stored cover buffer
-  void loadRecentBooks(int maxBooks);
-  void loadRecentCovers(int coverHeight);
+  // Reads the cached shelf into homeBooks (no SD walk, no book opened).
+  void loadShelfFromCache();
+  // Reconciles the cache with the card: cheap read-time refresh always, full
+  // BookLibraryIndex::collectShelf rebuild only on a fingerprint mismatch.
+  void reconcileShelf();
+  void loadCovers(int coverHeight);
+  // The one place that decides what an empty shelf says.
+  void renderEmptyShelf(Rect tile) const;
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,

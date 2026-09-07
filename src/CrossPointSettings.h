@@ -214,11 +214,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // told apart only by timing. The power button is the menu key, everywhere,
   // the reader page included:
   //
-  //   tap    (release <= POWER_CLICK_MAX_HOLD_MS)  the short-click action,
+  //   tap    (release <= POWER_TAP_MAX_HOLD_MS)    the short-click action,
   //                                                Control Centre by default
   //   double tap (two taps <= POWER_DOUBLE_TAP_MS  frontlight on/off
   //               apart)
-  //   hold   (release >= POWER_MENU_HOLD_MS)       close the control centre
+  //   hold   (POWER_MENU_HOLD_MS while STILL DOWN) close the control centre
   //
   // WHY THE TAP IS PARKED. The double tap is back, so a tap can no longer be
   // dispatched on its own release -- it might turn out to be the first half of
@@ -236,13 +236,58 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // are not. The window is kept at the short end of the usual 250-350 ms range
   // for the same reason it was before: it is pure cost.
   //
-  // The band between the tap ceiling and the hold floor is deliberately inert:
-  // that is where a slow tap and a short hold are indistinguishable, and doing
-  // nothing costs the user less than a wrong open-or-close. 700 ms already
-  // reads as a hold, so the ceiling sits just under the hold floor.
-  static constexpr unsigned long POWER_CLICK_MAX_HOLD_MS = 700;
-  static constexpr unsigned long POWER_MENU_HOLD_MS = 1000;
+  // WHY THE HOLD FIRES WHILE THE BUTTON IS STILL DOWN. It used to fire on the
+  // RELEASE at 1000 ms, which is the worst possible place for it: the user held
+  // for a second, let go, and only then did a ~1.3 s full panel refresh start,
+  // so closing the control centre cost well over two seconds and read as a
+  // device that had not noticed the press at all. The threshold is now a
+  // deadline, not a measurement of a finished press -- main.cpp's decoder
+  // publishes the close the moment POWER_MENU_HOLD_MS elapses with the button
+  // still down, exactly as the side keys already do for Back and Select
+  // (SIDE_LONG_PRESS_MS, MappedInputManager::updateSideKeyGestures). The refresh
+  // therefore starts under the user's finger and is most of the way through by
+  // the time they let go. The later release is then swallowed whole: it must
+  // never also publish a tap, or the panel would close and immediately reopen.
+  //
+  // THE VALUES. The hold floor drops 1000 -> 600 ms and the tap ceiling 700 ->
+  // 350 ms.
+  //
+  //   600 ms hold floor: the same number the side keys use for Back and Select
+  //   (SIDE_LONG_PRESS_MS), so every "hold" on this device means the same
+  //   duration, and one already validated as long enough that a sloppy tap does
+  //   not reach it. Below ~500 ms a deliberate press starts tripping the hold.
+  //
+  //   350 ms tap ceiling: the ordinary tap/hold boundary, and above the ~200 ms
+  //   a relaxed press actually takes on a stiff side-mounted button. It is also
+  //   about POWER_DOUBLE_TAP_MS, the window each half of a double tap has to fit
+  //   in anyway -- a tap much slower than the double-tap window could not have
+  //   been half of one.
+  //
+  //   It is a SEPARATE constant from POWER_CLICK_MAX_HOLD_MS rather than a lower
+  //   value for it. That one is still the ceiling every other touch board applies
+  //   to a raw power release (MappedInputManager::wasPowerShortClick), and those
+  //   boards have no double tap, no hold-to-close and no dead band -- their
+  //   700 ms is not this 350 ms and tightening it there would be an unrelated
+  //   behaviour change on hardware this work never touched.
+  //
+  //   The 350-600 ms dead band is the deliberate part, and it is why the ceiling
+  //   was not simply raised to meet the floor. A release in there does nothing
+  //   at all: it is where a slow tap and a short hold cannot be told apart, and
+  //   the wrong guess is expensive in both directions (a stray open costs a
+  //   ~487 ms panel render, a stray close throws away the panel the user just
+  //   opened). 250 ms of dead band is wide enough that a sloppy tap has to be
+  //   nearly twice its normal length before it can close the menu, and it can
+  //   never close it by accident: past 600 ms the close has already fired under
+  //   the finger, so the band's upper edge is unreachable by a tap that is still
+  //   trying to be a tap.
+  // Gesture boards only: the tap ceiling and the hold floor of the decoder in
+  // main.cpp.
+  static constexpr unsigned long POWER_TAP_MAX_HOLD_MS = 350;
+  static constexpr unsigned long POWER_MENU_HOLD_MS = 600;
   static constexpr unsigned long POWER_DOUBLE_TAP_MS = 300;
+  // Every other touch board: the longest raw power release that still counts as
+  // a short click. Untouched.
+  static constexpr unsigned long POWER_CLICK_MAX_HOLD_MS = 700;
 
   // --- Side-key long press -----------------------------------------------------
   // Out of a book only (see MappedInputManager::setInBookContext): hold Left for

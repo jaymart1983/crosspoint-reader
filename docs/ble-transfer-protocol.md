@@ -50,6 +50,9 @@ Supported upload kinds:
 - `bmp`: `.bmp` saved under `/Pictures`
 - `firmware`: `.bin` staged on SD card, validated, confirmed on device, then flashed through the OTA path
 - `progress`: a batch of reading positions to apply to books already on the card (see below)
+- `catalog_page`: one screen of the app's Calibre library, answering a `catalog_page` request (see
+  [The Store](#the-store-requests-over-the-notify-channel))
+- `catalog_detail`: one book in full, answering a `catalog_detail` request
 
 Downloads use `start_get`, notifications on `data-out`, and one `get_ack` per frame.
 
@@ -59,7 +62,11 @@ Supported download kinds:
 - `library`: the on-device book list with reading progress (see below)
 - `progress_result`: the per-entry outcome of the last `progress` upload (see below)
 
-There is one further control op, `set_time`, which is not a transfer.
+There are two further control ops that are not transfers: `set_time`, and `catalog_error` (the app declining
+a Store request it cannot answer).
+
+The Store also runs **the other way round** — the device asks, the app answers — over the `status` notify
+channel. See [The Store](#the-store-requests-over-the-notify-channel).
 
 ### `library`
 
@@ -316,6 +323,259 @@ rather than leaving a stale one, because a stale stamp would claim a position th
 much earlier, and let an incoming sync overwrite genuinely fresher reading. That path is now reachable only on a board
 with no working RTC.
 
+## The Store: requests over the notify channel
+
+The Store screen (home > Store) browses the phone app's Calibre library live. It is the one part of this
+protocol where **the device asks and the app answers**, which needs a mechanism the rest of it does not.
+
+### Why it is shaped this way
+
+BLE GATT is client-driven. The phone is the central and the reader is the peripheral, so the reader cannot
+call out — it can only reply to what the phone writes. Everything else in this document fits that: the app
+decides to push a book, decides to pull the library, and the reader answers.
+
+A store inverts it. The reader knows which six books are on screen, and it knows the instant the user turns
+the page. The app is the only thing that can reach Calibre. Polling from the app would mean either a store
+that lags a page turn by seconds or a radio that never sleeps.
+
+So the `status` characteristic — already `notify`, already subscribed to by the app — is used as a **request
+channel**. When the reader wants something it puts a `pending` object in the status document and notifies:
+
+```json
+{"state":"connected","protocol_version":1,"store_supported":true,"mode":"store",
+ "pending":{"req":7,"op":"catalog_page","offset":12,"limit":6,
+            "thumb_w":72,"thumb_h":108,"desc_max":160,"timeout_ms":20000}}
+```
+
+The app sees the notification, fetches from Calibre, and answers with an **ordinary upload**: `start_put`
+with the matching `kind`, framed writes on `data-in`, credit flow control through `ack_bytes`, SHA-256 over
+the whole payload, `commit`. The one thing the store adds to an upload is a `req` field. The `hello` gate,
+the framing, the hashing and the flow control are all reused untouched — the store is a new question, not a
+new transport.
+
+**A status carrying `pending` is deliberately terse.** A notification carries at most `ATT_MTU - 3` bytes,
+which is 182 on a client that negotiates the iOS default, and the request is the field that must survive.
+So while a request is outstanding the reader omits `firmware_name`, `browser_companion_url`,
+`firmware_ota_supported`, `resume_supported`, `upload_kinds`, `download_kinds`, `device_id`, `device_nonce`
+and `has_trusted_host`. None of them change within a session and all of them were read before the gate
+opened. **The notification is a doorbell; a GATT read of `status` is authoritative** and returns the whole
+document whatever the MTU.
+
+### Correlation
+
+`req` is a counter, starting at 1, incremented for every request the reader issues in a session. The reader
+has **at most one request outstanding at a time**.
+
+An answer naming any other `req` is refused with `{"state":"error","error":"stale request"}` and changes
+nothing on screen — the pending request stays pending. That is what stops a slow reply, arriving after the
+user has already paged on, from repainting the screen with the page they left. `req` is not persisted; a
+reconnect starts a new session and a new counter.
+
+### Retry
+
+A GATT notification is unacknowledged: there is no ATT-level confirmation that the app received it. So an
+outstanding request is **re-notified every 4 s, up to 4 times**, carrying the same `req`. An app that saw
+the first copy answers once; the later copies name a request it has already answered and are ignored.
+
+### Timeout
+
+| Request | Deadline |
+| --- | --- |
+| `catalog_page`, `catalog_detail` | 20 s from issue to the answering `start_put` |
+| `catalog_fetch` | 45 s from issue to the answering `start_put` |
+
+The fetch window is longer because Calibre may convert a format before the app can begin sending. **The
+clock stops when the upload starts** — from there the ordinary transfer machinery reports progress and owns
+the failure.
+
+A request that is not answered by its deadline fails **visibly**: the screen reads *The phone did not
+answer* with the reason underneath and a Retry hint. It never hangs and it never silently shows stale
+content. The request id still advances, so the reply that eventually arrives is refused as stale rather than
+painted over whatever the user did next.
+
+The app can also give up early rather than let the reader sit out the whole window:
+
+```json
+{"op":"catalog_error","req":7,"error":"calibre unreachable"}
+```
+
+`req` must be the outstanding request or the message is ignored. `error` is truncated to 96 bytes and shown
+to the user verbatim.
+
+### What the device shows when the app is absent or slow
+
+**The Store requires the app to be open and connected.** There is no cached catalogue and no offline
+browsing, by construction: nothing about the catalogue is written to the card except the covers of the page
+currently on screen, and those are deleted when the screen closes or the link drops.
+
+| Situation | Screen |
+| --- | --- |
+| No app connected, or connected but not yet through `hello` | *The Store needs your phone* — pairing code and the companion QR code |
+| Request outstanding | *Asking your phone* / *Fetching from Calibre*, Back cancels |
+| Deadline passed, or `catalog_error` | *The phone did not answer* + reason, Select retries, Back leaves |
+| Link dropped mid-browse | Everything on screen is discarded and it returns to *The Store needs your phone* |
+
+## The catalogue container
+
+A page is text (titles, authors, a blurb) and pictures (a cover per book). Base64 inside JSON would cost a
+third more bytes on a link where bytes are the whole constraint, and would force the reader to hold a
+decoded page in RAM. So a `catalog_page` / `catalog_detail` payload is one binary blob:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | magic, ASCII `CPCT` |
+| 4 | 1 | version, currently `1` |
+| 5 | 1 | flags, reserved, must be `0` |
+| 6 | 2 | `jsonLen`, little-endian uint16 |
+| 8 | `jsonLen` | the JSON header, UTF-8, no trailing NUL |
+| 8 + `jsonLen` | … | the thumbnails, concatenated in `items` order |
+
+Each thumbnail occupies exactly as many bytes as its item's `thumb` field says; an item with `"thumb":0`
+(or no `thumb`) contributes nothing and is listed without art. The blob's total length must equal
+`8 + jsonLen + sum(thumb)`.
+
+Caps: `jsonLen` ≤ 6144, any single `thumb` ≤ 8192, the whole container ≤ 64 KB. A container that breaks any
+of them is refused whole — nothing partial is ever shown.
+
+### How the device handles it without holding it
+
+The blob is staged on SD by the ordinary upload path (part file, hash, rename on commit), exactly like a
+`progress` batch. Only then is it opened: the header is read into RAM (kilobytes, capped), and each
+thumbnail is copied **card-to-card** into its own small `.bmp` under `/.crosspoint/store/`, 512 bytes at a
+time. The staged blob is deleted immediately afterwards. The covers are then drawn straight off the card by
+the same `Bitmap` + `GfxRenderer::drawBitmap1Bit` path the book covers use.
+
+Nothing larger than the JSON header and one 512-byte copy buffer is ever resident, so a page costs the same
+RAM whether its covers are 1 KB or 8 KB each. This is the same "stage, then serve" shape as
+`src/util/BookLibraryIndex.cpp`.
+
+### Thumbnail format
+
+**1-bit uncompressed Windows BMP, bottom-up, 2-entry palette (index 0 black `0x000000`, index 1 white
+`0xFFFFFF`), `biCompression = BI_RGB`.** The app must dither — it has the CPU and the original artwork, the
+reader has neither.
+
+| Use | Size | Row stride | Bytes |
+| --- | --- | --- | --- |
+| List thumbnail (`catalog_page`) | 72 × 108 | 9 | 62 + 9 × 108 = **1034** |
+| Detail cover (`catalog_detail`) | 144 × 216 | 18 | 62 + 18 × 216 = **3950** |
+
+The reader sends the dimensions it wants in `thumb_w` / `thumb_h` on every request, so these are the current
+values rather than a contract. A BMP of some other size still draws — `drawBitmap` scales it down to fit —
+but it costs bytes for pixels that are then thrown away.
+
+Why 1-bit rather than greyscale: a 4-bit 72 × 108 cover is 3.9 KB against 1.03 KB, which is the difference
+between a page arriving in about a second and one taking four. Why 72 px wide: it is a whole number of bytes
+per row, and 72 × 108 is the largest 2:3 cover that lets six rows fit a 480 × 800 portrait screen under the
+header and the button hints.
+
+**Per-page payload: six covers at 1034 bytes plus roughly 3 KB of JSON, so about 9 KB.**
+
+## `catalog_page`
+
+Request (in `status`):
+
+```json
+{"pending":{"req":7,"op":"catalog_page","offset":12,"limit":6,
+            "thumb_w":72,"thumb_h":108,"desc_max":160,"timeout_ms":20000}}
+```
+
+`offset` is a zero-based index into the app's whole (possibly filtered or sorted — that is the app's choice,
+and it must be stable within a session) library view. `limit` is always 6 today.
+
+Answer: `{"op":"start_put","kind":"catalog_page","req":7,"size":…,"sha256":…}` then the container, whose
+JSON header is:
+
+```json
+{"req":7,"offset":12,"total":842,
+ "items":[
+   {"id":"1234","title":"Dune","author":"Frank Herbert",
+    "description":"Set on the desert planet Arrakis…","filename":"Dune.epub",
+    "format":"epub","size":1048576,"thumb":1034}
+ ]}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `req` | number | Must equal the request's `req`. Anything else is `stale request`. |
+| `offset` | number | Echo of the request's `offset`; the reader shows it in the page footer. |
+| `total` | number | Books in the whole view. **This is what makes pagination possible** — without it the reader cannot know whether a next page exists. |
+| `items[].id` | string | Opaque handle, ≤ 64 bytes, printable ASCII, no `"` or `\`. Sent straight back in `catalog_detail` and `catalog_fetch`. Required. |
+| `items[].title` | string | Truncated to 160 bytes. Falls back to `id` when empty. |
+| `items[].author` | string | Truncated to 128 bytes. May be empty. |
+| `items[].description` | string | **Truncated by the app to `desc_max` = 160 bytes**, and re-truncated on the device on a code-point boundary if it is not. One or two lines under the title is all a row can show. |
+| `items[].filename` | string | What the app would name the file if it sent this book. Same rules as the `book` upload kind (≤ 96 bytes, alphanumeric plus `. _ -` and space, no leading dot). An entry without a usable one is listed but cannot be fetched. |
+| `items[].format` | string | `epub`, `txt`, … Display only. |
+| `items[].size` | number | Bytes, display only. |
+| `items[].thumb` | number | Length of this item's BMP in the blob. `0` or absent means no cover. |
+
+`onDevice` is deliberately **not** a wire field: whether `/Books/<filename>` already exists is answered on
+the device, per entry, because the app cannot know what is on the card.
+
+A page with no items and a non-zero `total` is refused as `empty catalog page`; a genuinely empty library is
+`total: 0` with an empty `items`.
+
+## `catalog_detail`
+
+Tapping a row asks for the book:
+
+```json
+{"pending":{"req":8,"op":"catalog_detail","id":"1234",
+            "thumb_w":144,"thumb_h":216,"desc_max":1024,"timeout_ms":20000}}
+```
+
+Answered with `kind: "catalog_detail"`, the same container, one `item` instead of `items`:
+
+```json
+{"req":8,"id":"1234",
+ "item":{"id":"1234","title":"Dune","author":"Frank Herbert","format":"epub",
+         "size":1048576,"filename":"Dune.epub","thumb":3950,
+         "description":"…up to 1024 bytes…"}}
+```
+
+**Why a second round trip rather than reusing what the page already sent.** The list carries a 160-byte
+snippet; the detail view wants the whole blurb, and a cover four times the area. Carrying 1 KB descriptions
+and 3950-byte covers for six books in every page payload would take a page from ~9 KB to ~30 KB — more than
+triple the cost of the frequent action (turning a page) to save one round trip on the rarer one (opening a
+book). On a link this slow the page turn is what has to be fast. The round trip costs roughly a second,
+which is about what the panel spends on a full repaint anyway, and the screen says *Asking your phone* while
+it happens.
+
+## `catalog_fetch`
+
+The detail view's button. The reader publishes:
+
+```json
+{"pending":{"req":9,"op":"catalog_fetch","id":"1234","name":"Dune.epub","timeout_ms":45000}}
+```
+
+and the app answers with the **existing `book` upload kind**, plus the `req`:
+
+```json
+{"op":"start_put","kind":"book","req":9,"name":"Dune.epub","size":1048576,"sha256":"…"}
+```
+
+In store mode a `book` upload is accepted **only** as the answer to an outstanding `catalog_fetch`, and only
+when `name` matches the `name` the request published. Anything else is refused (`stale request` /
+`unexpected book`): the user asked for one specific book and an unsolicited push must not land on the card in
+its place. Outside store mode the `book` kind is unchanged and needs no `req`.
+
+From `start_put` onwards this is an ordinary upload. The Store screen shows a progress bar fed by the same
+byte counts `status` reports, and on `commit` the file is renamed into `/Books` and the screen becomes *Added
+to your books* with Select to open it.
+
+**A book that is already on the device** never reaches this path: the catalogue page marked it `onDevice`
+from the card, the detail view's button reads *On this device* and opens the local copy instead of asking for
+a copy. If the file appears between the page arriving and the button being pressed, the ordinary `exists`
+error surfaces on the Store screen.
+
+## What the Store leaves on the card
+
+Only the covers of the page and the detail currently on screen, under `/.crosspoint/store/` and
+`/.crosspoint/store/detail/`, plus the staged container while a transfer is in flight. All of it is deleted
+when the Store screen closes, and the page/detail covers are also dropped the moment the link drops. Nothing
+about the catalogue survives a session.
+
 ## Explicit Non-goals
 
 This protocol deliberately stays within CrossPoint Reader's project scope. CrossPoint does not support packages,
@@ -333,8 +593,9 @@ Status JSON includes capability fields so clients can hide unsupported controls:
 {
   "protocol_version": 1,
   "firmware_name": "CrossPoint Reader",
-  "upload_kinds": ["book", "bmp", "firmware", "progress"],
+  "upload_kinds": ["book", "bmp", "firmware", "progress", "catalog_page", "catalog_detail"],
   "download_kinds": ["crash_report", "library", "progress_result"],
+  "store_supported": true,
   "firmware_ota_supported": true,
   "clock_supported": true,
   "device_time": 1725600000,
@@ -343,5 +604,9 @@ Status JSON includes capability fields so clients can hide unsupported controls:
 ```
 
 `device_time` is present only when the device knows the time; see [Device clock](#device-clock).
+`store_supported` says this firmware speaks the Store request protocol; `"mode": "store"` says the Store
+screen is the one currently open. A status that carries a `pending` block omits the static fields above —
+see [The Store](#the-store-requests-over-the-notify-channel) for why, and read the characteristic rather
+than relying on the notification if you need them.
 
 Clients should still handle `state: "error"` for rejected operations.

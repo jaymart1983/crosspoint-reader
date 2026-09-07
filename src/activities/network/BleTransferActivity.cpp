@@ -4,6 +4,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <HalClock.h>
 #include <NimBLEDevice.h>
 #include <esp_mac.h>
@@ -27,6 +28,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/FirmwareFlasher.h"
+#include "util/BleCatalog.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookLibraryIndex.h"
 #include "util/BookProgressSync.h"
@@ -66,6 +68,14 @@ constexpr const char* PROGRESS_BATCH_NAME = "progress.json";
 // shelf-sized result array would be silently truncated on the wire.
 constexpr const char* PROGRESS_RESULT_PATH = "/.crosspoint/ble-progress-result.json";
 constexpr const char* PROGRESS_RESULT_NAME = "progress-result.json";
+// A catalogue page or book detail is staged exactly like every other upload --
+// part file, SHA-256 over the whole thing, rename on commit -- and only then
+// unpacked. The store's own scratch lives under /.crosspoint/store so closing
+// the screen can clear the whole lot in one place.
+constexpr const char* STORE_ROOT = "/.crosspoint/store";
+constexpr const char* CATALOG_PART_PATH = "/.crosspoint/store/catalog.bin.part";
+constexpr const char* CATALOG_PATH = "/.crosspoint/store/catalog.bin";
+constexpr const char* CATALOG_NAME = "catalog.bin";
 constexpr size_t MIN_BLE_FIRMWARE_BYTES = 64UL * 1024UL;
 constexpr size_t MAX_BLE_BOOK_BYTES = 32UL * 1024UL * 1024UL;
 constexpr size_t MAX_BLE_BMP_BYTES = 8UL * 1024UL * 1024UL;
@@ -322,6 +332,10 @@ std::string transferKindName(const BleTransferActivity::TransferKind kind) {
       return "crash_report";
     case BleTransferActivity::TransferKind::LIBRARY:
       return "library";
+    case BleTransferActivity::TransferKind::CATALOG_PAGE:
+      return "catalog_page";
+    case BleTransferActivity::TransferKind::CATALOG_DETAIL:
+      return "catalog_detail";
     case BleTransferActivity::TransferKind::NONE:
       return "";
   }
@@ -526,8 +540,17 @@ struct BleTransferRuntime {
   }
 };
 
-BleTransferActivity::BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : Activity("BleTransfer", renderer, mappedInput), eventMutex_(xSemaphoreCreateMutex()) {}
+BleTransferActivity::BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const Mode mode)
+    // The name is what ActivityManager::goHome() reads to decide which home row
+    // to land on, so the two modes must not share one.
+    : Activity(mode == Mode::STORE ? "Store" : "BleTransfer", renderer, mappedInput),
+      mode_(mode),
+      eventMutex_(xSemaphoreCreateMutex()) {
+  if (mode_ == Mode::STORE) {
+    store_ = makeUniqueNoThrow<BleStoreController>(renderer, mappedInput, *this);
+    if (!store_) LOG_ERR("BLE", "OOM: store controller");
+  }
+}
 
 BleTransferActivity::~BleTransferActivity() {
   if (eventMutex_) {
@@ -546,6 +569,7 @@ void BleTransferActivity::onEnter() {
     BLE_TRUSTED_HOSTS.loadFromFile();
   }
   mbedtls_sha256_init(&shaContext_);
+  if (store_) store_->begin();
   setState(State::STARTING);
 
   ble_ = std::make_unique<BleTransferRuntime>(*this);
@@ -563,6 +587,9 @@ void BleTransferActivity::onExit() {
   resetTransfer(true);
   // The staged library listing, the uploaded progress batch and its result
   // document are scratch files for one session only.
+  if (store_) store_->end();
+  if (Storage.exists(CATALOG_PATH)) Storage.remove(CATALOG_PATH);
+  if (Storage.exists(CATALOG_PART_PATH)) Storage.remove(CATALOG_PART_PATH);
   if (Storage.exists(LIBRARY_INDEX_PATH)) Storage.remove(LIBRARY_INDEX_PATH);
   if (Storage.exists(PROGRESS_BATCH_PATH)) Storage.remove(PROGRESS_BATCH_PATH);
   if (Storage.exists(PROGRESS_RESULT_PATH)) Storage.remove(PROGRESS_RESULT_PATH);
@@ -575,6 +602,20 @@ void BleTransferActivity::onExit() {
 
 void BleTransferActivity::loop() {
   processBleEvents();
+
+  // The pairing prompts belong to the session, not to either face of it, so they
+  // are handled before the store gets a look at the frame.
+  if (store_ && state_ != State::SAVE_HOST_PROMPT && state_ != State::FORGET_HOST_PROMPT) {
+    if (pendingCommit_) {
+      pendingCommit_ = false;
+      processCommit();
+      return;
+    }
+    store_->tick();
+    if (store_->handleInput()) return;
+    if (statusDirty_) publishStatus();
+    return;
+  }
 
   if (state_ == State::FIRMWARE_CONFIRM) {
     handleFirmwareConfirm();
@@ -693,6 +734,11 @@ void BleTransferActivity::onBleConnected() {
 void BleTransferActivity::onBleDisconnected() {
   if (state_ == State::UPDATING || state_ == State::RESTARTING) return;
 
+  // The Store is live or it is nothing: with the link gone there is no
+  // catalogue to show, so it drops what it had rather than leaving a page on
+  // screen that no longer describes anything reachable.
+  if (store_) store_->onAppGone();
+
   if (transferOpen_ || downloadOpen_) {
     const bool keepPartialUpload = transferOpen_ && uploadResumable_;
     resetTransfer(!keepPartialUpload);
@@ -762,6 +808,8 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
       trustedHostName_ = host->name.empty() ? hostId : host->name;
       deviceNonce_ = makeNonceHex();
       setState(State::CONNECTED);
+      // The gate is the only thing the Store was waiting for: ask for page one.
+      if (store_) store_->onAppReady();
       return;
     }
 
@@ -777,6 +825,7 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     helloAccepted_ = true;
     trustedHelloAccepted_ = false;
     setState(State::CONNECTED);
+    if (store_) store_->onAppReady();
     return;
   }
 
@@ -787,6 +836,21 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
 
   if (op == "save_host") {
     setError("save_host requires completed upload");
+    return;
+  }
+
+  if (op == "catalog_error") {
+    // The app giving up early rather than letting the device sit out the whole
+    // timeout: Calibre unreachable, the book withdrawn, a query that failed. It
+    // must name the request it is failing, or it is ignored.
+    if (!store_) {
+      setError("store not open", false);
+      return;
+    }
+    const uint32_t req = doc["req"] | 0u;
+    std::string message = doc["error"] | "";
+    if (message.size() > 96) message.resize(96);
+    store_->onAppError(req, message);
     return;
   }
 
@@ -822,6 +886,9 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     resetTransfer(true);
 
     const std::string kind = doc["kind"] | "";
+    // Present only on an answer to a `pending` request. Zero everywhere else,
+    // which is exactly what an ordinary Bluetooth Transfer upload sends.
+    const uint32_t responseReq = doc["req"] | 0u;
     fileName_ = doc["name"] | "";
     expectedSize_ = doc["size"] | 0;
     expectedSha256_ = toLowerAscii(doc["sha256"] | "");
@@ -847,6 +914,20 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
       if (!isSafeBleBookName(fileName_)) {
         setError("unsafe book filename");
         return;
+      }
+      if (store_) {
+        // In the Store, a book upload is only ever the answer to a
+        // `catalog_fetch` the device published. It must name that request and
+        // that exact file: the user asked for one book, and an unsolicited push
+        // must not land on the card in its place.
+        if (!store_->acceptsResponse(responseReq, BleStoreController::PendingOp::FETCH)) {
+          setError("stale request", false);
+          return;
+        }
+        if (storeExpectedBook_.empty() || fileName_ != storeExpectedBook_) {
+          setError("unexpected book", false);
+          return;
+        }
       }
       if (expectedSize_ == 0 || expectedSize_ > MAX_BLE_BOOK_BYTES) {
         setError("invalid book size");
@@ -898,6 +979,34 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
       fileName_ = PROGRESS_BATCH_NAME;
       partPath_ = PROGRESS_BATCH_PART_PATH;
       finalPath_ = PROGRESS_BATCH_PATH;
+    } else if (kind == "catalog_page" || kind == "catalog_detail") {
+      // The answer to the question in the last `status` notification. It rides
+      // the ordinary upload path -- framing, credit flow control, SHA-256,
+      // commit -- and adds only the request id that ties it to the question.
+      const bool detail = kind == "catalog_detail";
+      if (!store_) {
+        setError("store not open", false);
+        return;
+      }
+      if (!store_->acceptsResponse(
+              responseReq, detail ? BleStoreController::PendingOp::DETAIL : BleStoreController::PendingOp::PAGE)) {
+        // A reply to a question the device has already given up on or moved past.
+        // Refused without disturbing whatever is on screen now.
+        setError("stale request", false);
+        return;
+      }
+      if (expectedSize_ == 0 || expectedSize_ > BleCatalog::MAX_CONTAINER_BYTES) {
+        setError("invalid catalog size");
+        return;
+      }
+      if (!Storage.ensureDirectoryExists(STORE_ROOT)) {
+        setError("could not create store directory");
+        return;
+      }
+      transferKind_ = detail ? TransferKind::CATALOG_DETAIL : TransferKind::CATALOG_PAGE;
+      fileName_ = CATALOG_NAME;
+      partPath_ = CATALOG_PART_PATH;
+      finalPath_ = CATALOG_PATH;
     } else if (kind == "firmware") {
       if (!isSafeBleFirmwareName(fileName_)) {
         setError("unsafe firmware filename");
@@ -968,6 +1077,10 @@ void BleTransferActivity::onControlWrite(const std::string& value) {
     lastProgressStatusBytes_ = receivedBytes_;
     lastDisplayProgressBytes_ = receivedBytes_;
     setState(State::RECEIVING);
+    // The store's own deadline ends here: from now on the transfer path reports
+    // progress and owns the failure, so the screen shows bytes rather than a
+    // countdown.
+    if (store_ && transferKind_ == TransferKind::BOOK) store_->onFetchStarted();
     return;
   }
 
@@ -1076,6 +1189,9 @@ void BleTransferActivity::onDataWrite(const std::string& value) {
                                                                          : BLE_PROGRESS_DISPLAY_INTERVAL_BYTES;
   if (receivedBytes_ == expectedSize_ || receivedBytes_ - lastDisplayProgressBytes_ >= displayInterval) {
     lastDisplayProgressBytes_ = receivedBytes_;
+    // The store paints its own progress bar, on the same cadence the transfer
+    // screen repaints on.
+    if (store_ && transferKind_ == TransferKind::BOOK) store_->onFetchProgress(receivedBytes_, expectedSize_);
     requestUpdate();
   }
 }
@@ -1109,7 +1225,8 @@ void BleTransferActivity::processCommit() {
     resetTransfer(true);
     return;
   }
-  if ((transferKind_ == TransferKind::FIRMWARE || transferKind_ == TransferKind::PROGRESS) &&
+  if ((transferKind_ == TransferKind::FIRMWARE || transferKind_ == TransferKind::PROGRESS ||
+       transferKind_ == TransferKind::CATALOG_PAGE || transferKind_ == TransferKind::CATALOG_DETAIL) &&
       Storage.exists(finalPath_.c_str()) && !Storage.remove(finalPath_.c_str())) {
     setError("could not replace staged upload");
     resetTransfer(true);
@@ -1122,9 +1239,27 @@ void BleTransferActivity::processCommit() {
   }
   removePartOnExit_ = false;
 
+  if (transferKind_ == TransferKind::CATALOG_PAGE || transferKind_ == TransferKind::CATALOG_DETAIL) {
+    // Only now that the whole container is on the card and its SHA-256 checks
+    // out is it unpacked: the header is read (kilobytes), each cover is copied
+    // out to its own small file, and the staged blob is deleted. Nothing larger
+    // than one 512-byte buffer is ever resident.
+    const bool detail = transferKind_ == TransferKind::CATALOG_DETAIL;
+    removePartOnExit_ = false;
+    if (store_) store_->onCatalogCommitted(finalPath_.c_str(), detail);
+    resetTransfer(false);
+    return;
+  }
+
   if (transferKind_ == TransferKind::BOOK || transferKind_ == TransferKind::BMP) {
     savedPath_ = finalPath_;
     if (transferKind_ == TransferKind::BOOK) clearBookCache(savedPath_);
+    // Told before completeFinalState(): that may stop on the save-host prompt,
+    // and the book is on the card either way.
+    if (store_ && transferKind_ == TransferKind::BOOK) {
+      storeExpectedBook_.clear();
+      store_->onFetchSaved(savedPath_);
+    }
     completeFinalState(State::SAVED);
     return;
   }
@@ -1558,12 +1693,32 @@ void BleTransferActivity::setState(const State state) {
   requestUpdate();
 }
 
-void BleTransferActivity::setError(const std::string& error) {
+void BleTransferActivity::setError(const std::string& error) { setError(error, true); }
+
+void BleTransferActivity::setError(const std::string& error, const bool notifyStore) {
   errorMessage_ = error;
   state_ = State::ERROR;
   statusDirty_ = true;
   requestUpdate();
+  // A refused answer to a question the device is no longer asking is a normal
+  // race, reported to the app in `status` and nowhere else. Everything else the
+  // Store user needs to see.
+  if (notifyStore && store_) store_->onTransferError(error);
 }
+
+void BleTransferActivity::storePublishStatus() {
+  statusDirty_ = true;
+  publishStatus();
+  requestUpdate();
+}
+
+void BleTransferActivity::storeRepaint() { requestUpdate(); }
+
+void BleTransferActivity::storeArmBookFetch(const std::string& filename) { storeExpectedBook_ = filename; }
+
+void BleTransferActivity::storeFinish() { finish(); }
+
+void BleTransferActivity::storeOpenBook(const std::string& path) { activityManager.goToReader(path); }
 
 void BleTransferActivity::publishStatus() {
   statusDirty_ = false;
@@ -1573,30 +1728,49 @@ void BleTransferActivity::publishStatus() {
 std::string BleTransferActivity::buildStatusJson() const {
   JsonDocument doc;
   const std::string state = stateName(state_);
+  // A status that carries a `pending` request drops the fields that never change
+  // within a session. A notification is capped at ATT_MTU-3 bytes -- 182 on a
+  // client that negotiates the iOS default -- and the request is the one field
+  // that MUST survive it. The capability lists, the companion URL and the auth
+  // nonce were all read before the gate opened, so nothing is lost. A client
+  // that wants the whole document can always READ the characteristic; the
+  // notification is a doorbell, the read is authoritative.
+  const bool terse = store_ && store_->hasPending();
+
   doc["state"] = state.c_str();
   doc["protocol_version"] = 1;
-  doc["firmware_name"] = "CrossPoint Reader";
-  doc["browser_companion_url"] = BLE_TRANSFER_WEB_URL;
-  doc["firmware_ota_supported"] = true;
-  doc["resume_supported"] = true;
-  JsonArray uploadKinds = doc["upload_kinds"].to<JsonArray>();
-  uploadKinds.add("book");
-  uploadKinds.add("bmp");
-  uploadKinds.add("firmware");
-  uploadKinds.add("progress");
-  JsonArray downloadKinds = doc["download_kinds"].to<JsonArray>();
-  downloadKinds.add("crash_report");
-  downloadKinds.add("library");
-  downloadKinds.add("progress_result");
+  if (!terse) {
+    doc["firmware_name"] = "CrossPoint Reader";
+    doc["browser_companion_url"] = BLE_TRANSFER_WEB_URL;
+    doc["firmware_ota_supported"] = true;
+    doc["resume_supported"] = true;
+    JsonArray uploadKinds = doc["upload_kinds"].to<JsonArray>();
+    uploadKinds.add("book");
+    uploadKinds.add("bmp");
+    uploadKinds.add("firmware");
+    uploadKinds.add("progress");
+    uploadKinds.add("catalog_page");
+    uploadKinds.add("catalog_detail");
+    JsonArray downloadKinds = doc["download_kinds"].to<JsonArray>();
+    downloadKinds.add("crash_report");
+    downloadKinds.add("library");
+    downloadKinds.add("progress_result");
+  }
+  // The store is a capability of this firmware, not of this screen: an app can
+  // see it is supported while the user is still on the transfer screen.
+  doc["store_supported"] = true;
+  if (mode_ == Mode::STORE) doc["mode"] = "store";
   doc["clock_supported"] = halClock.isAvailable();
   // Omitted, never zeroed, when the device does not know the time: the client
   // uses its absence to decide it must send `set_time`, and its value to notice
   // drift. A `0` here would read as a real 1970 instant.
   uint32_t deviceEpoch = 0;
   if (halClock.getEpoch(deviceEpoch)) doc["device_time"] = deviceEpoch;
-  doc["device_id"] = deviceId_.c_str();
-  doc["device_nonce"] = deviceNonce_.c_str();
-  doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
+  if (!terse) {
+    doc["device_id"] = deviceId_.c_str();
+    doc["device_nonce"] = deviceNonce_.c_str();
+    doc["has_trusted_host"] = BLE_TRUSTED_HOSTS.hasHosts();
+  }
   if (!trustedHostName_.empty()) doc["trusted_host"] = trustedHostName_.c_str();
   if (hostPaired_) doc["paired"] = true;
   if (hostPairSkipped_) doc["pairing"] = "skipped";
@@ -1629,6 +1803,10 @@ std::string BleTransferActivity::buildStatusJson() const {
   }
   if (state_ == State::SENT) doc["name"] = fileName_.c_str();
   if (state_ == State::ERROR && !errorMessage_.empty()) doc["error"] = errorMessage_.c_str();
+  // The request channel. When the device wants something from the app it says so
+  // here, and the app answers with an upload naming the same `req`. Absent
+  // whenever nothing is outstanding.
+  if (store_) store_->describePending(doc);
 
   String output;
   serializeJson(doc, output);
@@ -1650,6 +1828,12 @@ void BleTransferActivity::render(RenderLock&&) {
   }
   if (state_ == State::FORGET_HOST_PROMPT) {
     renderForgetHostPrompt();
+    return;
+  }
+  if (store_) {
+    // The Store owns the whole screen in its mode; the session's own states
+    // (receiving, error) are reported through it, not around it.
+    store_->render(sessionCode_);
     return;
   }
 

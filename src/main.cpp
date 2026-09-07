@@ -224,9 +224,9 @@ static void toggleFrontlightAndPersist() {
 // (see CrossPointSettings::usesPowerGestures). One button, three gestures, the
 // same everywhere including the reader page:
 //
-//   tap        the configured short-click action, Control Centre by default
-//   double tap frontlight on/off
-//   hold ~1 s  close the control centre
+//   tap          the configured short-click action, Control Centre by default
+//   double tap   frontlight on/off
+//   hold ~600 ms close the control centre, fired WHILE THE BUTTON IS DOWN
 //
 // THE PARKED TAP. The double tap is back, so a tap can no longer be dispatched
 // on its own release: it might be the first half of one. It is parked at the
@@ -247,9 +247,26 @@ static void toggleFrontlightAndPersist() {
 // explicitly choosing it, and there is no way to have both the double tap and a
 // zero-latency tap on one button.
 //
+// THE HOLD FIRES UNDER THE FINGER. The close used to be decided on the RELEASE:
+// the user held for a second, lifted, and only then did the ~1.3 s full panel
+// refresh begin, so the whole gesture cost over two seconds and felt like the
+// device had missed the press. POWER_MENU_HOLD_MS is now a deadline instead --
+// the moment it elapses with the button still down the close is published, the
+// same shape the side keys already use for Back and Select (SIDE_LONG_PRESS_MS,
+// MappedInputManager::updateSideKeyGestures). The refresh starts while the
+// finger is still on the button and is largely done by the time it lifts.
+//
+// The release that follows a fired hold is then swallowed WHOLE: it must not
+// park a tap, because publishing one a double-tap window later would reopen the
+// panel the hold just closed. holdFired is what remembers that, and it is
+// cleared on the release rather than on the next press so a press that is still
+// down across many frames only ever fires once.
+//
 // A release in the inert band between the tap ceiling and the hold floor is
 // discarded: a slow tap and a short hold cannot be told apart there, and doing
-// nothing costs less than a wrong open-or-close.
+// nothing costs less than a wrong open-or-close. The band's upper edge is in
+// practice unreachable -- past POWER_MENU_HOLD_MS the close has already fired --
+// so the band only ever swallows genuinely ambiguous 350-600 ms presses.
 //
 // Returns true when the frame is fully consumed.
 static bool handlePowerGestures() {
@@ -257,10 +274,19 @@ static bool handlePowerGestures() {
 
   // Release of the parked tap: 0 means nothing parked.
   static unsigned long parkedTapAt = 0;
+  // The current press already published its close; its release is now scrap.
+  static bool holdFired = false;
 
   if (gpio.wasReleased(HalGPIO::BTN_POWER)) {
     const unsigned long held = gpio.getPowerButtonHeldTime();
-    if (held <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS) {
+    if (holdFired) {
+      // The close went out under the finger. This release is the tail of that
+      // same gesture and must publish nothing at all.
+      holdFired = false;
+      parkedTapAt = 0;
+      return true;
+    }
+    if (held <= CrossPointSettings::POWER_TAP_MAX_HOLD_MS) {
       if (parkedTapAt != 0 && millis() - parkedTapAt <= CrossPointSettings::POWER_DOUBLE_TAP_MS) {
         parkedTapAt = 0;
         toggleFrontlightAndPersist();
@@ -270,14 +296,25 @@ static bool handlePowerGestures() {
       if (parkedTapAt == 0) parkedTapAt = 1;  // millis() rollover: 0 is the "nothing parked" sentinel
       return true;                            // parked, not yet published
     }
-    // A hold supersedes a tap still inside its window: opening the menu and then
-    // closing it again would be a confusing net-nothing.
+    // A press long enough to be ambiguous supersedes a tap still inside its
+    // window: opening the menu and then closing it again would be a confusing
+    // net-nothing.
     parkedTapAt = 0;
-    if (held >= CrossPointSettings::POWER_MENU_HOLD_MS) {
-      mappedInputManager.setPowerCloseFrame(true);
-      return false;  // fall through so the panel sees the close on this frame
-    }
     return true;  // the inert band between the tap ceiling and the hold floor
+  }
+
+  // The hold, decided while the button is still down. Not during the wake hold:
+  // that press started before the device was awake, its release is already
+  // spoken for below, and firing on it would close the control centre the user
+  // has not opened yet -- the old release-edge decoder could not reach this case
+  // because the wake release returns before the decoder ever runs.
+  if (!holdFired && !wakePowerReleasePending && gpio.isPressed(HalGPIO::BTN_POWER) &&
+      gpio.getPowerButtonHeldTime() >= CrossPointSettings::POWER_MENU_HOLD_MS) {
+    holdFired = true;
+    // A hold supersedes a tap still parked from the press before it.
+    parkedTapAt = 0;
+    mappedInputManager.setPowerCloseFrame(true);
+    return false;  // fall through so the panel sees the close on this frame
   }
 
   if (parkedTapAt != 0 && millis() - parkedTapAt > CrossPointSettings::POWER_DOUBLE_TAP_MS) {

@@ -110,6 +110,14 @@ class HalFile : public Print {
   size_t write(uint8_t b) override;
   bool rename(const char* newPath);
   bool isDirectory() const;
+  // FAT modification date/time as UTC epoch seconds, for "which book arrived
+  // most recently". False when the entry carries no plausible date -- a card
+  // written by firmware older than the SD date callback (see HalStorage::begin)
+  // stamps every file with SdFat's fixed default, and a caller must treat that
+  // as "unknown", never as a real instant. FAT has no timezone, so the stored
+  // value is read back as the local time it was written in; the reader only
+  // ever compares two of them against each other.
+  bool modifiedEpoch(uint32_t& epochUtc);
   void rewindDirectory();
   bool close();
   HalFile openNextFile();

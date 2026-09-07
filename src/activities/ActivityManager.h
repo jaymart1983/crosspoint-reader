@@ -20,7 +20,11 @@ class RenderLock;  // forward declaration
 // OPDS_BROWSER is kept unconditionally even on FREEINK_CAP_NETWORK=0 builds:
 // it is a transient "which row was I on" hint, never persisted, and HomeActivity
 // simply never produces it when the OPDS row is not built.
-enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+//
+// STORE and MORE were appended rather than inserted for the same reason: the
+// values are ordinary enumerators that other code switches on, and appending
+// keeps every existing case label meaning what it did.
+enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU, STORE, MORE };
 
 /**
  * ActivityManager
@@ -88,7 +92,13 @@ class ActivityManager {
   void goToUsbDrive();
 #if FREEINK_CAP_BLE_TRANSFER
   void goToBluetoothTransfer();
+  // The Calibre store. Same BLE session as Bluetooth Transfer -- one NimBLE
+  // server, one auth gate, one framing layer -- in its browsing mode.
+  void goToStore();
 #endif
+  // Browse Files / Recent Books / File Transfer / Settings, demoted off the
+  // home screen when home became a shelf.
+  void goToMoreMenu();
   void goToSettings();
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();

@@ -1,6 +1,7 @@
 #include "HalStorage.h"
 
 #include <FS.h>  // need to be included before SdFat.h for compatibility with FS.h's File class
+#include <HalClock.h>
 #include <Logging.h>
 #include <SDCardManager.h>
 #if FREEINK_CAP_USB_MSC
@@ -15,6 +16,59 @@ namespace {
 #if FREEINK_CAP_USB_MSC
 freeink::UsbMassStorage usbMassStorage;
 #endif
+
+// FAT epoch: 1980-01-01T00:00:00. FAT stores no timezone, so the fields written
+// here and the fields read back in modifiedEpoch() are the same clock's local
+// reading -- the only thing anything compares is two of them against each other.
+constexpr uint32_t FAT_EPOCH_UTC = 315532800UL;  // 1980-01-01T00:00:00Z
+constexpr uint32_t SECONDS_PER_DAY = 86400UL;
+
+bool isLeapYear(const uint32_t year) { return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0; }
+
+uint32_t daysInMonth(const uint32_t year, const uint32_t month) {
+  static constexpr uint8_t DAYS[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month == 2 && isLeapYear(year)) return 29;
+  return DAYS[month - 1];
+}
+
+// Without this, every file the device writes carries SdFat's fixed default date
+// and "newest added" is unanswerable for anything that did not arrive over USB
+// from a host PC -- which is every book the Store pulls down. The clock is
+// seeded from the firmware's build epoch at boot (see HalClock::begin), so this
+// has a usable date from the first write on a brand-new device.
+void sdDateTimeCallback(uint16_t* date, uint16_t* time, uint8_t* ms10) {
+  if (ms10) *ms10 = 0;
+  uint32_t epoch = 0;
+  if (!halClock.getEpoch(epoch) || epoch < FAT_EPOCH_UTC) {
+    // No usable clock: leave FAT's own zero rather than invent a date. SdFat
+    // reads a zero date as "not set", which modifiedEpoch() reports as unknown.
+    if (date) *date = 0;
+    if (time) *time = 0;
+    return;
+  }
+
+  uint32_t days = (epoch - FAT_EPOCH_UTC) / SECONDS_PER_DAY;
+  uint32_t remainder = (epoch - FAT_EPOCH_UTC) % SECONDS_PER_DAY;
+  uint32_t year = 1980;
+  while (true) {
+    const uint32_t yearDays = isLeapYear(year) ? 366 : 365;
+    if (days < yearDays) break;
+    days -= yearDays;
+    year++;
+  }
+  uint32_t month = 1;
+  while (days >= daysInMonth(year, month)) {
+    days -= daysInMonth(year, month);
+    month++;
+  }
+  // FAT packs the year as an offset from 1980 in 7 bits, so it runs out in 2108.
+  if (year > 2107) year = 2107;
+  if (date) *date = FS_DATE(static_cast<uint16_t>(year), static_cast<uint8_t>(month), static_cast<uint8_t>(days + 1));
+  if (time) {
+    *time = FS_TIME(static_cast<uint8_t>(remainder / 3600), static_cast<uint8_t>((remainder % 3600) / 60),
+                    static_cast<uint8_t>(remainder % 60));
+  }
+}
 }  // namespace
 
 HalStorage HalStorage::instance;
@@ -32,7 +86,12 @@ HalStorage::HalStorage() {
 
 // begin() and ready() are only called from setup, no need to acquire mutex for them
 
-bool HalStorage::begin() { return SDCard.begin(); }
+bool HalStorage::begin() {
+  // Registered before the mount so the very first file written after boot is
+  // already stamped. Global to SdFat, hence set once here rather than per open.
+  FsDateTime::setCallback(sdDateTimeCallback);
+  return SDCard.begin();
+}
 
 bool HalStorage::ready() const { return SDCard.ready(); }
 
@@ -240,6 +299,29 @@ size_t HalFile::write(const void* buf, size_t count) { HAL_FILE_WRAPPED_CALL(wri
 size_t HalFile::write(uint8_t b) { HAL_FILE_WRAPPED_CALL(write, b); }
 bool HalFile::rename(const char* newPath) { HAL_FILE_WRAPPED_CALL(rename, newPath); }
 bool HalFile::isDirectory() const { HAL_FILE_FORWARD_CALL(isDirectory, ); }  // already thread-safe, no need to wrap
+
+bool HalFile::modifiedEpoch(uint32_t& epochUtc) {
+  uint16_t date = 0;
+  uint16_t time = 0;
+  {
+    HalStorage::StorageLock lock;
+    assert(impl != nullptr);
+    if (!impl->file.getModifyDateTime(&date, &time)) return false;
+  }
+  // FAT's "never set" is a zero date, which FS_YEAR would read as 1980-00-00.
+  if (date == 0) return false;
+  const uint32_t year = FS_YEAR(date);
+  const uint32_t month = FS_MONTH(date);
+  const uint32_t day = FS_DAY(date);
+  if (year < 1980 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+
+  uint32_t days = 0;
+  for (uint32_t y = 1980; y < year; y++) days += isLeapYear(y) ? 366 : 365;
+  for (uint32_t m = 1; m < month; m++) days += daysInMonth(year, m);
+  days += day - 1;
+  epochUtc = FAT_EPOCH_UTC + days * SECONDS_PER_DAY + FS_HOUR(time) * 3600UL + FS_MINUTE(time) * 60UL + FS_SECOND(time);
+  return true;
+}
 void HalFile::rewindDirectory() { HAL_FILE_WRAPPED_CALL(rewindDirectory, ); }
 bool HalFile::close() { HAL_FILE_WRAPPED_CALL(close, ); }
 HalFile HalFile::openNextFile() {

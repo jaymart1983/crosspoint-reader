@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -46,6 +47,10 @@ bool isSupportedBookFile(const std::string_view name) {
 struct BookEntry {
   std::string name;
   uint32_t size = 0;
+  // FAT modification time as epoch seconds; 0 when the entry carries no
+  // plausible date (a card written before the SD date callback existed stamps
+  // every file the same). Unknown, never "1980".
+  uint32_t modifiedAt = 0;
 };
 
 struct BookInfo {
@@ -61,6 +66,9 @@ struct BookInfo {
   // read as "unknown", never as epoch 0.
   uint32_t timestamp = 0;
   bool hasTimestamp = false;
+  // The book has a progress.bin on disk at all, i.e. it has been opened and read
+  // past the start. True for .txt/.md books too, whose `percent` is always 0.
+  bool hasLocation = false;
 };
 
 // progress.bin is opaque and format-specific; these two parsers mirror exactly
@@ -101,6 +109,7 @@ BookInfo describeBook(const std::string& path, const std::string& fileName) {
   size_t locationLen = 0;
   const std::string cachePath = BookProgressSync::cachePathForBook(path);
   const bool hasLocation = BookProgressSync::readProgressBlob(cachePath, location, locationLen);
+  info.hasLocation = hasLocation;
   if (hasLocation) {
     info.location = BookProgressSync::encodeLocation(location, locationLen);
     info.hasTimestamp = ProgressFile::readSavedTime(cachePath, info.timestamp);
@@ -179,6 +188,11 @@ bool scanDirectory(const std::string& dirPath, std::vector<BookEntry>& books, st
     entry.getName(nameBuffer.get(), NAME_BUFFER_SIZE);
     const bool isDir = entry.isDirectory();
     const auto size = static_cast<uint32_t>(isDir ? 0 : entry.fileSize());
+    // Read while the entry is still open; there is no path-addressed way back to
+    // it afterwards, and the directory entry is already in hand so it costs
+    // nothing extra.
+    uint32_t modifiedAt = 0;
+    if (!isDir && !entry.modifiedEpoch(modifiedAt)) modifiedAt = 0;
     entry.close();
 
     // Dot entries are the reader's own caches and host-OS litter, never shelf content.
@@ -188,7 +202,7 @@ bool scanDirectory(const std::string& dirPath, std::vector<BookEntry>& books, st
       continue;
     }
     if (!isSupportedBookFile(nameBuffer.get())) continue;
-    books.push_back(BookEntry{std::string(nameBuffer.get()), size});
+    books.push_back(BookEntry{std::string(nameBuffer.get()), size, modifiedAt});
   }
   dir.close();
 
@@ -231,27 +245,27 @@ bool writeEntry(HalFile& out, bool& first, const std::string& relPath, const uin
   return out.print(json) == json.length();
 }
 
-}  // namespace
+// Walks the shelf once and hands each book to `visit` as (relative path, entry,
+// description). Returns false when the visitor aborted; an unreadable folder
+// costs its own books only.
+//
+// This is the ONE /Books scanner. Both the BLE `library` document and the home
+// screen's shelf go through it, so the two can never disagree about which files
+// count as books, how deep the walk goes, or what order they come back in.
+using BookVisitor = std::function<bool(const std::string& relPath, const BookEntry& entry, const BookInfo& info)>;
 
-bool BookLibraryIndex::build(const char* booksRoot, const char* outPath, Stats* stats) {
-  if (!booksRoot || !outPath) return false;
+// The directory half of the walk, without describeBook(). Split out so
+// fingerprint() can pay for the folder traversal alone -- which is milliseconds
+// -- while collectShelf() and build() pay for the metadata loads too.
+using DirVisitor = std::function<bool(const std::string& relPath, const BookEntry& entry)>;
 
-  HalFile out;
-  if (!Storage.openFileForWrite(TAG, outPath, out)) {
-    LOG_ERR(TAG, "Could not open library index for write: %s", outPath);
-    return false;
-  }
-
-  Stats collected;
-  bool ok = out.print("[") == 1;
-  bool first = true;
-
+bool walkShelfDirs(const char* booksRoot, const DirVisitor& visit) {
   // Explicit worklist rather than recursion: one directory handle is open at a
   // time, and the traversal cannot blow the task stack on a deep tree.
   std::vector<std::string> pendingDirs;
   pendingDirs.emplace_back();  // the books root itself
 
-  while (ok && !pendingDirs.empty()) {
+  while (!pendingDirs.empty()) {
     const std::string rel = std::move(pendingDirs.back());
     pendingDirs.pop_back();
     const std::string dirPath = rel.empty() ? std::string(booksRoot) : std::string(booksRoot) + "/" + rel;
@@ -278,20 +292,51 @@ bool BookLibraryIndex::build(const char* booksRoot, const char* outPath, Stats* 
     }
 
     for (const auto& book : books) {
-      // Each book is an SD-bound metadata load; a large shelf would otherwise
-      // outlast the watchdog window.
       resetTaskWatchdogIfSubscribed();
       const std::string relPath = rel.empty() ? book.name : rel + "/" + book.name;
-      const BookInfo info = describeBook(dirPath + "/" + book.name, book.name);
+      if (!visit(relPath, book)) return false;
+    }
+  }
+  return true;
+}
+
+bool walkShelf(const char* booksRoot, const BookVisitor& visit) {
+  const std::string root(booksRoot);
+  return walkShelfDirs(booksRoot, [&](const std::string& relPath, const BookEntry& book) {
+    // Each book is an SD-bound metadata load; a large shelf would otherwise
+    // outlast the watchdog window.
+    resetTaskWatchdogIfSubscribed();
+    const BookInfo info = describeBook(root + "/" + relPath, book.name);
+    return visit(relPath, book, info);
+  });
+}
+
+}  // namespace
+
+bool BookLibraryIndex::build(const char* booksRoot, const char* outPath, Stats* stats) {
+  if (!booksRoot || !outPath) return false;
+
+  HalFile out;
+  if (!Storage.openFileForWrite(TAG, outPath, out)) {
+    LOG_ERR(TAG, "Could not open library index for write: %s", outPath);
+    return false;
+  }
+
+  Stats collected;
+  bool ok = out.print("[") == 1;
+  bool first = true;
+
+  if (ok) {
+    ok = walkShelf(booksRoot, [&](const std::string& relPath, const BookEntry& book, const BookInfo& info) {
       if (!writeEntry(out, first, relPath, book.size, info)) {
         LOG_ERR(TAG, "Short write building library index at %s", relPath.c_str());
-        ok = false;
-        break;
+        return false;
       }
       collected.books++;
       if (info.fromMetadataCache) collected.withMetadata++;
       if (info.percent > 0.0f) collected.withProgress++;
-    }
+      return true;
+    });
   }
 
   if (ok) ok = out.print("]") == 1;
@@ -306,5 +351,80 @@ bool BookLibraryIndex::build(const char* booksRoot, const char* outPath, Stats* 
   LOG_DBG(TAG, "Library index: %u books (%u with metadata, %u in progress)", static_cast<unsigned>(collected.books),
           static_cast<unsigned>(collected.withMetadata), static_cast<unsigned>(collected.withProgress));
   if (stats) *stats = collected;
+  return true;
+}
+
+namespace {
+
+// Home-screen order: currently reading first, most recently read of those at the
+// very top; then everything never opened, newest arrival first. An unknown sort
+// key (0) is the OLDEST possible within its group -- a book whose read time or
+// FAT date the card cannot tell us must not jump the queue ahead of one it can.
+bool shelfLess(const BookLibraryIndex::ShelfBook& a, const BookLibraryIndex::ShelfBook& b) {
+  if (a.inProgress != b.inProgress) return a.inProgress;
+  const uint32_t keyA = a.inProgress ? a.readAt : a.addedAt;
+  const uint32_t keyB = b.inProgress ? b.readAt : b.addedAt;
+  if (keyA != keyB) return keyA > keyB;
+  // Same instant (or both unknown): fall back on the order the file browser
+  // shows, so the home screen is at least stable between visits.
+  return FsHelpers::naturalLess(a.relPath, b.relPath);
+}
+
+}  // namespace
+
+bool BookLibraryIndex::collectShelf(const char* booksRoot, const size_t limit, std::vector<ShelfBook>& out) {
+  out.clear();
+  if (!booksRoot || limit == 0) return false;
+  out.reserve(limit + 1);
+
+  const bool ok = walkShelf(booksRoot, [&](const std::string& relPath, const BookEntry& book, const BookInfo& info) {
+    ShelfBook candidate;
+    candidate.relPath = relPath;
+    candidate.title = info.title;
+    candidate.author = info.author;
+    candidate.percent = info.percent;
+    candidate.readAt = info.hasTimestamp ? info.timestamp : 0;
+    candidate.addedAt = book.modifiedAt;
+    candidate.inProgress = info.hasLocation;
+
+    // Bounded top-N: the shelf is walked in full but only `limit` entries are
+    // ever resident, so a thousand books cost the same RAM as ten.
+    if (out.size() == limit && !shelfLess(candidate, out.back())) return true;
+    const auto at = std::upper_bound(out.begin(), out.end(), candidate, shelfLess);
+    out.insert(at, std::move(candidate));
+    if (out.size() > limit) out.pop_back();
+    return true;
+  });
+
+  if (!ok) {
+    out.clear();
+    return false;
+  }
+  LOG_DBG(TAG, "Shelf: %u books kept (cap %u)", static_cast<unsigned>(out.size()), static_cast<unsigned>(limit));
+  return true;
+}
+
+bool BookLibraryIndex::fingerprint(const char* booksRoot, Fingerprint& out) {
+  out = Fingerprint{};
+  if (!booksRoot) return false;
+
+  // FNV-1a over path + size + modification time of every book on the shelf.
+  // Order-independence is deliberately NOT wanted: the walk is deterministic, so
+  // a book renamed into a different sort position must read as a change.
+  uint32_t hash = 2166136261u;
+  const auto mix = [&hash](const uint8_t byte) {
+    hash ^= byte;
+    hash *= 16777619u;
+  };
+
+  const bool ok = walkShelfDirs(booksRoot, [&](const std::string& relPath, const BookEntry& book) {
+    for (const char c : relPath) mix(static_cast<uint8_t>(c));
+    for (int shift = 0; shift < 32; shift += 8) mix(static_cast<uint8_t>((book.size >> shift) & 0xFF));
+    for (int shift = 0; shift < 32; shift += 8) mix(static_cast<uint8_t>((book.modifiedAt >> shift) & 0xFF));
+    out.books++;
+    return true;
+  });
+  if (!ok) return false;
+  out.hash = hash;
   return true;
 }

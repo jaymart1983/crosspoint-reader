@@ -11,11 +11,24 @@
 #include <string>
 
 #include "activities/Activity.h"
+#include "activities/network/BleStoreController.h"
 
 struct BleTransferRuntime;
 
-class BleTransferActivity final : public Activity {
+// One BLE session, two faces.
+//
+// Mode::TRANSFER is the Bluetooth Transfer screen: pair, push books, pull the
+// library. Mode::STORE is the Calibre store from the home screen. They share
+// everything below the UI -- one NimBLE server, one hello/HMAC gate, one framed
+// upload path with credit flow control and SHA-256, one download path -- because
+// the store is a new *question*, not a new transport. What the store adds is the
+// request channel: the device publishes what it wants in the `status`
+// notification the app already subscribes to, and the app answers with an
+// ordinary upload naming the same request id. See BleStoreController for why.
+class BleTransferActivity final : public Activity, public BleStoreController::Host {
  public:
+  enum class Mode { TRANSFER, STORE };
+
   enum class State {
     STARTING,
     ADVERTISING,
@@ -33,9 +46,20 @@ class BleTransferActivity final : public Activity {
     FORGET_HOST_PROMPT,
     ERROR
   };
-  enum class TransferKind { NONE, BOOK, BMP, FIRMWARE, PROGRESS, CRASH_REPORT, LIBRARY, PROGRESS_RESULT };
+  enum class TransferKind {
+    NONE,
+    BOOK,
+    BMP,
+    FIRMWARE,
+    PROGRESS,
+    CRASH_REPORT,
+    LIBRARY,
+    PROGRESS_RESULT,
+    CATALOG_PAGE,
+    CATALOG_DETAIL
+  };
 
-  explicit BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
+  explicit BleTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Mode mode = Mode::TRANSFER);
   ~BleTransferActivity() override;
 
   void onEnter() override;
@@ -60,6 +84,15 @@ class BleTransferActivity final : public Activity {
     BleEventType type;
     std::string value;
   };
+
+  const Mode mode_;
+  // Present only in Mode::STORE. Owns the catalogue screens and the
+  // request/timeout/retry state machine; owns no BLE of its own.
+  std::unique_ptr<BleStoreController> store_;
+  // The one filename the store has armed a `book` upload for. A book upload in
+  // store mode that names anything else is refused: the device asked for a
+  // specific book and must not accept a different one in its place.
+  std::string storeExpectedBook_;
 
   State state_ = State::STARTING;
   std::unique_ptr<BleTransferRuntime> ble_;
@@ -136,6 +169,17 @@ class BleTransferActivity final : public Activity {
   void resetTransfer(bool removePart);
   void setState(State state);
   void setError(const std::string& error);
+  // notifyStore=false refuses one request without failing the Store screen --
+  // used for an answer to a question the device is no longer asking, which is a
+  // normal race, not an error the user should see.
+  void setError(const std::string& error, bool notifyStore);
+
+  // BleStoreController::Host
+  void storePublishStatus() override;
+  void storeRepaint() override;
+  void storeArmBookFetch(const std::string& filename) override;
+  void storeFinish() override;
+  void storeOpenBook(const std::string& path) override;
   void publishStatus();
   std::string buildStatusJson() const;
   bool setPendingTrustedHost(const std::string& hostId, const std::string& hostName, const std::string& secret);
