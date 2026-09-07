@@ -226,20 +226,30 @@ void BaseTheme::drawTouchBackButton(const GfxRenderer& renderer) {
   renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 1, 6, true);
   const char* label = I18N.get(StrId::STR_BACK);
   const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
-  const int textHeight = renderer.getTextHeight(UI_10_FONT_ID);
+  const int ascender = renderer.getFontAscenderSize(UI_10_FONT_ID);
   // drawText's Y is the TOP of the text box -- it adds the ascender itself
-  // (GfxRenderer.cpp: yPos = y + getFontAscenderSize). getTextHeight returns the
-  // ascender, which is taller than the cap height of a string like "« Back", so
-  // a straight centre of that box reads slightly bottom-heavy; the 32px chip
-  // gives it room. Do NOT add textHeight here -- that draws the glyphs below the
-  // chip, and below the panel with it. Worked through on the 480x800 portrait
-  // frame with UI_10 (ascender 20, cap height 15): chip rows 764..795, this
-  // expression puts the text box at 770..789 and its ink at 775..789, i.e. 11
-  // rows of slack above and 6 below. `+ textHeight` put the baseline at 810 and
-  // the ink at 794..809 -- ten rows past the bottom of the panel, which is the
-  // 309-clipped-pixels-per-frame burst in ble3.log.
-  renderer.drawText(UI_10_FONT_ID, rect.x + (rect.width - textWidth) / 2,
-                    rect.y + (rect.height - textHeight) / 2, label);
+  // (GfxRenderer.cpp: yPos = y + getFontAscenderSize). So centring on
+  // getTextHeight (== the font-wide ascender) centres the font's design box,
+  // not the ink: the ascender covers the tallest glyph in the whole font plus
+  // the designer's leading, while "<< Back" only reaches cap height. On the
+  // 480x800 portrait frame with UI_10 (ascender 20, cap height 15) that left
+  // the ink at rows 775..789 of a 764..795 chip -- 11 rows of slack above, 6
+  // below, which is the bias visible on the device.
+  //
+  // Measuring the glyphs actually being drawn removes it. Solving
+  //   baseline - inkTop - rect.y == rect.y + rect.height - baseline
+  // for the baseline gives (rect.height + inkTop) / 2, and drawText wants the
+  // box top, which is the baseline minus the ascender.
+  //
+  // Do NOT add the text height to this Y. That was the earlier "fix": it put
+  // the baseline at 810 and the ink at 794..809, ten rows past the bottom of
+  // the panel -- the 309-clipped-pixels-per-frame burst in ble3.log.
+  int inkTop = 0;
+  int inkBottom = 0;
+  const int textTop = renderer.getTextInkBounds(UI_10_FONT_ID, label, inkTop, inkBottom)
+                          ? rect.y + (rect.height + inkTop + inkBottom) / 2 - ascender
+                          : rect.y + (rect.height - ascender) / 2;
+  renderer.drawText(UI_10_FONT_ID, rect.x + (rect.width - textWidth) / 2, textTop, label);
   setTouchBackButtonVisible(true);
 }
 

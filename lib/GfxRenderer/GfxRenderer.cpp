@@ -10,6 +10,7 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdlib>
 
 #include "FontCacheManager.h"
@@ -2275,6 +2276,40 @@ int GfxRenderer::getLineHeight(const int fontId) const {
 
 int GfxRenderer::getLineHeight(const int fontId, const float compression) const {
   return static_cast<int>(getLineHeight(fontId) * compression + 0.5f);
+}
+
+bool GfxRenderer::getTextInkBounds(const int fontId, const char* text, int& inkTop, int& inkBottom,
+                                   const EpdFontFamily::Style style) const {
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end() || text == nullptr) {
+    return false;
+  }
+  const auto& font = fontIt->second;
+
+  int top = INT_MIN;
+  int bottom = INT_MAX;
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
+    // Marks are overlays positioned relative to their base glyph, not part of
+    // the run's own box; skipping them matches getTextWidth.
+    if (BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) {
+      continue;
+    }
+    const EpdGlyph* glyph = font.getGlyph(cp, style);
+    // A space has a valid glyph but no bitmap; it must not drag the box to 0.
+    if (glyph == nullptr || glyph->height == 0) {
+      continue;
+    }
+    top = std::max(top, static_cast<int>(glyph->top));
+    bottom = std::min(bottom, glyph->top - glyph->height);
+  }
+
+  if (top == INT_MIN) {
+    return false;  // all-space or no drawable glyph: caller keeps its fallback
+  }
+  inkTop = top;
+  inkBottom = bottom;
+  return true;
 }
 
 int GfxRenderer::getTextHeight(const int fontId) const {

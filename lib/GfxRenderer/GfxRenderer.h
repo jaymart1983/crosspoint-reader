@@ -379,6 +379,21 @@ class GfxRenderer {
                            EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   int getTextHeight(int fontId) const;
 
+  /// Ink extents of \p text, in pixels above the baseline.
+  ///
+  /// [getTextHeight] returns the font-wide `ascender`, which is a design metric
+  /// covering the tallest glyph in the whole font plus any leading the designer
+  /// left above it. Centering a short label on it therefore leaves a visible
+  /// bias -- the gap above the ink exceeds the gap below by (ascender - inkTop).
+  /// These are the measured bounds of the glyphs actually being drawn:
+  /// \p inkTop is the highest ink above the baseline (cap height for "Back"),
+  /// \p inkBottom the lowest (negative when a descender drops below it).
+  ///
+  /// Returns false and leaves both outputs untouched when the font is unknown
+  /// or the string has no drawable glyphs, so callers can fall back.
+  bool getTextInkBounds(int fontId, const char* text, int& inkTop, int& inkBottom,
+                        EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+
   // Grayscale functions
   void setRenderMode(const RenderMode mode) { this->renderMode = mode; }
   RenderMode getRenderMode() const { return renderMode; }
