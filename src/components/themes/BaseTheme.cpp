@@ -171,7 +171,7 @@ namespace {
 // Chip geometry, in the CURRENT orientation: a touch user reads "bottom left of
 // what I am looking at", not "bottom left of the portrait panel".
 constexpr int kBackChipWidth = 108;
-constexpr int kBackChipMargin = 8;
+constexpr int kBackChipMargin = 4;  // 40px band - 2*4 = 32px chip; 8 left the text cramped
 // Extra slop so the chip clears the 44px touch-target guidance even though the
 // hint band itself is 40px tall.
 constexpr int kBackChipHitPadding = 6;
@@ -208,8 +208,13 @@ void BaseTheme::drawTouchBackButton(const GfxRenderer& renderer) {
   const char* label = I18N.get(StrId::STR_BACK);
   const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
   const int textHeight = renderer.getTextHeight(UI_10_FONT_ID);
+  // drawText's Y is a BASELINE, not a top edge -- see the textYOffset comment in
+  // drawButtonHints below. Centring the text box and passing that as the baseline
+  // pushed the glyphs down by their full height, so "Back" sat on the bottom rule
+  // with all the slack above it. Add textHeight to land the baseline under a
+  // vertically centred box.
   renderer.drawText(UI_10_FONT_ID, rect.x + (rect.width - textWidth) / 2,
-                    rect.y + (rect.height - textHeight) / 2, label);
+                    rect.y + (rect.height + textHeight) / 2, label);
   setTouchBackButtonVisible(true);
 }
 
