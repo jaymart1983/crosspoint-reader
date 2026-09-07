@@ -45,26 +45,38 @@ class MappedInputManager {
   // Runtime-only (never persisted): a board whose glass is switched off must
   // always come back with touch alive after a reboot or a wake, otherwise a
   // touch-first device like the X4 Pro can lock its owner out of the UI. Driven
-  // from Settings -> Controls -> Touchscreen. The capacitive Home key is
-  // deliberately NOT gated -- a five-second hold on it is the way back in (see
-  // handleTouchRescueHomeHold in main.cpp), and the side page keys are not gated
-  // either, so the device stays navigable with the glass off.
+  // from the control centre's Touch tile (and Settings -> Controls ->
+  // Touchscreen, which is the same gate). Deliberately NOT gated, so the device
+  // stays navigable with the glass dead: the two side keys -- including the
+  // Left+Right chord that opens the control centre, which is the way back in --
+  // and the capacitive Home key.
   static bool isTouchInputEnabled() { return touchInputEnabled; }
   static void setTouchInputEnabled(const bool enabled) { touchInputEnabled = enabled; }
+
+  // --- Left + Right chord ------------------------------------------------------
+  // One-frame event: both side keys went down together (see updateSideCombo).
+  // It toggles the control centre, which is the button-only route back to the
+  // touch switch after the glass has been turned off. Consumed on read so a
+  // re-entrant ActivityManager::loop() cannot act on the same chord twice.
+  bool consumeControlCenterChord() const {
+    const bool fired = sideComboFrame;
+    sideComboFrame = false;
+    return fired;
+  }
 #if FREEINK_CAP_TOUCH
   // --- One-frame power-button gesture events ---------------------------------
-  // On boards running the four-gesture power scheme (see
-  // CrossPointSettings::usesPowerGestures) the raw power release cannot be acted
-  // on where it happens: a single tap has to wait out the double-tap window
-  // before it is known to be a tap and not the first half of a frontlight
-  // toggle, and a hold only resolves once the button comes back up. main.cpp's
-  // decoder owns that timing and publishes the outcome here for exactly one
-  // frame; MappedInputManager swallows the raw release on those boards so no
+  // On boards running the two-gesture power scheme (see
+  // CrossPointSettings::usesPowerGestures) a press is only classified once the
+  // button comes back up: a release under the click ceiling is a tap, a release
+  // past the Back floor is Back, and the band between them is inert. main.cpp's
+  // decoder owns that classification and publishes the outcome here for exactly
+  // one frame; MappedInputManager swallows the raw release on those boards so no
   // consumer can see the same press twice.
   //
-  // The click frame stands in for the release itself, so every existing
-  // short-power-click consumer (Confirm, page turn, force refresh, footnotes)
-  // keeps working unchanged -- just deferred by the double-tap window.
+  // The click frame stands in for the release itself and is published on the
+  // very frame the finger lifts, so every existing short-power-click consumer
+  // (Confirm, page turn, force refresh, footnotes) keeps working unchanged and
+  // with no added latency.
   void setPowerClickFrame(const bool clicked) { powerClickFrame = clicked; }
   // A ~1 s power hold, folded into logical Button::Back below.
   void setPowerBackFrame(const bool back) { powerBackFrame = back; }
@@ -160,13 +172,36 @@ class MappedInputManager {
   // Fetch the pending swipe (if any) and map both endpoints to logical screen coords
   bool decodeSwipe(int& sx, int& sy, int& ex, int& ey) const;
 #if FREEINK_CAP_TOUCH
-  // The frame on which a short power click is dispatched: the deferred event on
+  // The frame on which a short power click is dispatched: the decoder's event on
   // gesture boards, the raw release everywhere else.
   bool wasPowerShortClick() const;
   bool wasPowerConfirmClick() const;
 #endif
   void rememberTouchHeldTime() const;
   void suppressNextRelease(Button button) const;
+
+  // --- Left + Right chord detection --------------------------------------------
+  // The two side keys are page up / page down, so a chord can only be told from
+  // two page turns by WAITING: the first side key down starts a short window in
+  // which neither key reports anything. If the other key joins inside the window
+  // the chord fires and both keys stay swallowed for the rest of the contact; if
+  // the window closes with one key still down, the parked press is republished
+  // and everything carries on as an ordinary page turn, one window late. A key
+  // that is released inside the window (a very fast tap) gets its parked press on
+  // the release frame and a synthetic release on the next one, so no consumer
+  // ever sees a press and a release in the same frame.
+  //
+  // Only armed on touch boards: they are the ones whose control centre the chord
+  // opens, and no other board should pay the window as page-turn latency.
+  static constexpr unsigned long SIDE_COMBO_WINDOW_MS = 80;
+  enum class SideCombo : uint8_t { Idle, Armed, Chord, Replay };
+  void updateSideCombo() const;
+  // The single point where BTN_UP / BTN_DOWN are read, so the chord state
+  // machine can swallow and republish their edges in one place.
+  bool readKey(uint8_t index, bool (HalGPIO::*fn)(uint8_t) const) const;
+  static uint8_t sideKeyMask(const uint8_t index) {
+    return index == HalGPIO::BTN_UP ? 0x1u : (index == HalGPIO::BTN_DOWN ? 0x2u : 0u);
+  }
 
   static bool touchInputEnabled;
 
@@ -175,6 +210,15 @@ class MappedInputManager {
   mutable unsigned long touchHeldOverrideAt = 0;
   mutable uint16_t longPressFiredButtons = 0;
   mutable uint16_t suppressedReleaseButtons = 0;
+  mutable SideCombo sideComboState = SideCombo::Idle;
+  mutable unsigned long sideComboArmedAt = 0;
+  mutable uint8_t sideComboArmedKey = HalGPIO::BTN_UP;
+  mutable bool sideComboFrame = false;
+  // Side-key edges the chord machine republishes this frame, and the release it
+  // has parked for the next one. Bit 0 = BTN_UP, bit 1 = BTN_DOWN.
+  mutable uint8_t sideEmitPress = 0;
+  mutable uint8_t sideEmitRelease = 0;
+  mutable uint8_t sideReleaseDue = 0;
 #if FREEINK_CAP_TOUCH
   bool powerClickFrame = false;
   bool powerBackFrame = false;

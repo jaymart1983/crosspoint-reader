@@ -146,32 +146,33 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   // --- Power-button gesture timing -------------------------------------------
-  // Boards that answer usesPowerGestures() carry four separate power-button
-  // gestures, told apart only by hold length and click spacing:
+  // Boards that answer usesPowerGestures() carry two power-button gestures,
+  // told apart only by how long the button was held:
   //
-  //   release <= POWER_CLICK_MAX_HOLD_MS   a click (Select, or a second click
-  //                                        inside the double-tap window ->
-  //                                        frontlight)
+  //   release <= POWER_CLICK_MAX_HOLD_MS   a tap -> the short-click action
+  //                                        (Select by default)
   //   release >= POWER_BACK_HOLD_MS        Back
-  //   still down at POWER_SLEEP_HOLD_MS    Sleep
   //
-  // The band between the click ceiling and the Back floor is deliberately
-  // inert: that is where a slow tap and a short hold are indistinguishable, and
-  // doing nothing costs the user less than a wrong Back. Back fires on the
-  // RELEASE rather than at the 1 s mark so a press on its way to the 5 s sleep
-  // hold never navigates back en route -- see handlePowerGestureRelease().
-  static constexpr unsigned long POWER_CLICK_MAX_HOLD_MS = 350;
-  // Double-tap window. Kept at the short end of the comfortable range because
-  // every single tap pays it as latency before it can be dispatched as Select.
-  static constexpr unsigned long POWER_DOUBLE_CLICK_MS = 300;
+  // Both fire on the RELEASE, so a tap is dispatched the instant the finger
+  // lifts -- there is no second gesture left that a tap could turn out to be
+  // the first half of, so nothing has to be parked and waited out.
+  //
+  // The band between the two is deliberately inert: that is where a slow tap
+  // and a short hold are indistinguishable, and doing nothing costs the user
+  // less than a wrong Back. With only these two gestures left it can be narrow
+  // -- 700 ms is already a hold by any reasonable reading, so the ceiling sits
+  // just under the Back floor rather than the 350 ms the four-gesture scheme
+  // needed to leave room for a double tap.
+  static constexpr unsigned long POWER_CLICK_MAX_HOLD_MS = 700;
   static constexpr unsigned long POWER_BACK_HOLD_MS = 1000;
-  static constexpr unsigned long POWER_SLEEP_HOLD_MS = 5000;
 
-  // True on boards whose power button carries the four-gesture scheme above.
+  // True on boards whose power button carries the two-gesture scheme above.
   // The X4 Pro has no physical Back or Confirm key -- touch plus the power
   // button is the whole input surface -- so the power button has to carry them.
   // Boards with real Back/Confirm keys keep the historical short-press/long-
-  // press pair untouched.
+  // press pair untouched. Sleep is NOT one of these gestures: it lives on the
+  // control centre's Sleep tile, which leaves the whole hold range above 1 s to
+  // Back alone.
   static bool usesPowerGestures() { return BoardConfig::isX4Pro(); }
 
   // Long-press Confirm action while reading an EPUB. The setting cycles through these values.
@@ -378,13 +379,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // How long the power button must be held before the device sleeps.
   //
   // SLEEP mode means "a short click sleeps", so the threshold drops to
-  // effectively nothing. Otherwise boards running the four-gesture scheme need
-  // the sleep hold pushed well clear of the 1 s Back hold, hence 5 s; every
-  // other board keeps the historical 400 ms so this change stays scoped to the
-  // devices whose power button had to grow extra jobs.
+  // effectively nothing. Otherwise the historical 400 ms applies. Boards on the
+  // gesture scheme do not reach this at all -- their power hold is Back, and
+  // main.cpp skips the hold-to-sleep path for them entirely unless the user has
+  // explicitly bound the power button to Sleep.
   uint16_t getPowerButtonDuration() const {
     if (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) return 10;
-    return usesPowerGestures() ? static_cast<uint16_t>(POWER_SLEEP_HOLD_MS) : 400;
+    return 400;
   }
   int getReaderFontId() const;
 

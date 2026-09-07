@@ -26,6 +26,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "DeviceSleep.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
@@ -48,16 +49,10 @@ FontDecompressor fontDecompressor;
 SdCardFontSystem sdFontSystem;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
 static unsigned long allowSleepAt = 0;
-// A power click that has happened but is not yet dispatched: it only becomes a
-// Select once the double-tap window closes without a second click.
-static unsigned long pendingPowerClickAt = 0;
-
-namespace {
-// Five-second Home-key hold that switches the touchscreen back on.
-constexpr unsigned long TOUCH_RESCUE_HOLD_MS = 5000;
-unsigned long homeKeyHoldStartedAt = 0;
-bool homeKeyHoldPastSdkThreshold = false;
-}  // namespace
+// Set by the control centre's Sleep tile; consumed by loop(). Deferred rather
+// than slept on the spot because enterDeepSleep() replaces the whole activity
+// stack, which would destroy the panel while its own event handler is running.
+static bool deviceSleepRequested = false;
 
 // A wake hold must never become an in-app power-button action.  Boot may continue
 // while the button is held; swallow the one release that ends that wake gesture.
@@ -210,130 +205,43 @@ void restartToHomeAfterStorageHandoff() {
 }
 
 #if FREEINK_CAP_TOUCH
-// Flip the frontlight and persist the new on/off preference. Reached from the
-// power-button double tap.
-static void toggleFrontlightAndPersist() {
-  const bool lightOn = !Frontlight.isOn();
-  Frontlight.setOn(lightOn);
-  SETTINGS.frontlightOn = lightOn ? 1 : 0;
-  SETTINGS.saveToFile();
-  LOG_INF("LIGHT", "Frontlight toggled %s by power button", lightOn ? "on" : "off");
-}
-#endif
-
-// Five-second Home-key hold that switches the touchscreen back on. This is the
-// way back in after the touchscreen has been switched off in
-// Settings -> Controls -> Touchscreen, so it has to work with the glass dead:
-// the Home key is a separate signal on the touch controller and is deliberately
-// never routed through MappedInputManager's touch gate.
-//
-// TIMING CAVEAT, deliberate and unavoidable without an SDK change: InputManager
-// reports only three Home-key events -- the press edge, a tap on release of a
-// SHORT press, and a one-shot long-press once the hold passes its own ~700 ms
-// threshold. A release AFTER that threshold produces no event at all, and there
-// is no "is the key still down" query. So the five seconds are timed from the
-// press edge and merely confirmed still-down at ~700 ms; a release somewhere
-// between 0.7 s and 5 s cannot be observed. Two things keep that honest:
-//   * the tracker is only armed while touch is already off, where the gesture
-//     has exactly one meaning and re-enabling is the fail-safe direction; and
-//   * any other button edge abandons a pending hold, so a user who held Home
-//     briefly and then carried on with the side keys does not get a surprise.
-static bool handleTouchRescueHomeHold() {
-  if (!BoardConfig::hasHomeKey()) return false;
-
-  if (MappedInputManager::isTouchInputEnabled()) {
-    homeKeyHoldStartedAt = 0;  // nothing to rescue
-    return false;
-  }
-
-  if (gpio.wasHomeKeyPressed()) {
-    homeKeyHoldStartedAt = millis();
-    homeKeyHoldPastSdkThreshold = false;
-    return false;
-  }
-  if (gpio.wasHomeKeyTapped()) {  // released under the SDK threshold: a tap, not a hold
-    homeKeyHoldStartedAt = 0;
-    return false;
-  }
-  if (gpio.wasHomeKeyLongPressed()) homeKeyHoldPastSdkThreshold = true;
-  if (gpio.wasAnyPressed() || gpio.wasAnyReleased()) {
-    homeKeyHoldStartedAt = 0;  // the user moved on to another key
-    return false;
-  }
-
-  if (homeKeyHoldStartedAt == 0 || !homeKeyHoldPastSdkThreshold) return false;
-  if (millis() - homeKeyHoldStartedAt < TOUCH_RESCUE_HOLD_MS) return false;
-
-  homeKeyHoldStartedAt = 0;
-  MappedInputManager::setTouchInputEnabled(true);
-  LOG_INF("TOUCH", "Touchscreen re-enabled by a %lu ms Home-key hold", TOUCH_RESCUE_HOLD_MS);
-  char message[48];
-  snprintf(message, sizeof(message), "%s %s", tr(STR_TOUCH_TOGGLE), I18N.get(StrId::STR_STATE_ON));
-  {
-    RenderLock lock;
-    GUI.drawPopup(renderer, message);
-  }
-  delay(600);
-  activityManager.requestUpdate();
-  return true;
-}
-
-#if FREEINK_CAP_TOUCH
 // Power-button gesture decoder for boards with no physical Back or Confirm key
-// (see CrossPointSettings::usesPowerGestures). One button, four gestures:
+// (see CrossPointSettings::usesPowerGestures). One button, two gestures:
 //
-//   single tap   -> the configured short-click action, Select by default
-//   double tap   -> frontlight on/off
-//   hold ~1 s    -> Back
-//   hold 5 s     -> Sleep (handled by the shared sleep path below, which reads
-//                   its threshold from getPowerButtonDuration())
+//   tap (release <= POWER_CLICK_MAX_HOLD_MS)   the configured short-click
+//                                              action, Select by default
+//   hold (release >= POWER_BACK_HOLD_MS)       Back
 //
-// Two ambiguities have to be resolved on purpose:
+// Both are decided on the RELEASE, which is the earliest moment either one is
+// knowable and -- now that the double tap and the sleep hold are gone -- also
+// the last: a tap has nothing left to wait for, so it is dispatched on the very
+// frame the finger lifts with no added latency. Sleep moved to the control
+// centre's Sleep tile and the frontlight to its own tile there, which is what
+// freed the whole hold range above 1 s for Back.
 //
-// 1. Tap vs double tap. A single tap CANNOT be dispatched on its own release --
-//    the second tap of a double tap has not happened yet. So the tap is parked
-//    and only dispatched once POWER_DOUBLE_CLICK_MS has passed with no second
-//    click. Every Select therefore costs up to ~300 ms of latency. That is
-//    acceptable here because the panel's own refresh is ~500 ms, so the delay
-//    lands inside the redraw the user is already waiting for; the window is
-//    still kept at the short end of the usual 250-350 ms double-click range so
-//    the cost stays as small as the gesture allows.
-// 2. Back vs Sleep. Back fires on the RELEASE of a hold at or past
-//    POWER_BACK_HOLD_MS, not at the 1 s mark itself, so a press on its way to a
-//    5 s sleep hold never navigates back en route. Sleep fires while the button
-//    is still down and does not return, so only one of the two can ever run for
-//    a given press. A release at or past the sleep threshold (possible only if
-//    sleep was blocked, e.g. during the post-wake grace window) is discarded
-//    rather than downgraded to Back.
+// A release inside the inert band between the click ceiling and the Back floor
+// is discarded: a slow tap and a short hold cannot be told apart there, and a
+// wrong Back costs the user more than nothing happening.
 //
 // Returns true when the frame is fully consumed.
 static bool handlePowerGestureRelease() {
   if (!CrossPointSettings::usesPowerGestures() || !gpio.wasReleased(HalGPIO::BTN_POWER)) return false;
 
   const unsigned long held = gpio.getPowerButtonHeldTime();
-  const unsigned long now = millis();
-
   if (held <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS) {
-    if (pendingPowerClickAt != 0 && now - pendingPowerClickAt <= CrossPointSettings::POWER_DOUBLE_CLICK_MS) {
-      pendingPowerClickAt = 0;
-      // Guarded rather than assumed: every board on the gesture scheme today has
-      // a frontlight, but a second tap must not write a frontlight preference on
-      // one that does not.
-      if (Frontlight.present()) toggleFrontlightAndPersist();
-      return true;
-    }
-    pendingPowerClickAt = now;  // park it; the loop below dispatches or drops it
-    return true;
+    mappedInputManager.setPowerClickFrame(true);
+    return false;  // fall through so the short-click action runs from its normal place
   }
-
-  pendingPowerClickAt = 0;  // a hold is never half of a double tap
-  if (held >= CrossPointSettings::POWER_BACK_HOLD_MS && held < CrossPointSettings::POWER_SLEEP_HOLD_MS) {
+  if (held >= CrossPointSettings::POWER_BACK_HOLD_MS) {
     mappedInputManager.setPowerBackFrame(true);
     return false;  // fall through so the active activity sees Back on this frame
   }
   return true;  // the inert band between the click ceiling and the Back floor
 }
 #endif
+
+// Requested by the control centre's Sleep tile (see DeviceSleep.h).
+void requestDeviceSleep() { deviceSleepRequested = true; }
 
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
 
@@ -359,7 +267,7 @@ static bool loadSleepFrameBuffer() {
 }
 
 // Enter deep sleep mode
-void enterDeepSleep(bool fromTimeout = false) {
+void enterDeepSleep(const bool fromTimeout) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
 
@@ -734,7 +642,11 @@ void loop() {
 
   // Check for any user activity (button press or release) or active background work
   static unsigned long lastActivityTime = millis();
-  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity() || halTiltSensor.hadActivity() ||
+  // Touch only counts as activity while the glass is switched on: with the
+  // touchscreen off (a palm resting on it while reading is the reason to switch
+  // it off) a contact must not keep the inactivity timer alive either.
+  const bool touchActivity = MappedInputManager::isTouchInputEnabled() && gpio.wasTouchActivity();
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || touchActivity || halTiltSensor.hadActivity() ||
       activityManager.preventAutoSleep()) {
     lastActivityTime = millis();         // Reset inactivity timer
     powerManager.setPowerSaving(false);  // Restore normal CPU frequency on user activity
@@ -747,8 +659,6 @@ void loop() {
     wakePowerReleasePending = false;
     return;
   }
-
-  if (handleTouchRescueHomeHold()) return;
 
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
@@ -780,15 +690,15 @@ void loop() {
   mappedInputManager.setPowerClickFrame(false);
   mappedInputManager.setPowerBackFrame(false);
   if (handlePowerGestureRelease()) return;
-  // A parked single tap becomes a real short click once the double-tap window
-  // closes. It is published as the power release the decoder swallowed, so the
-  // configured short-click action -- Select by default -- runs from its normal
-  // place rather than being special-cased here.
-  if (pendingPowerClickAt != 0 && millis() - pendingPowerClickAt > CrossPointSettings::POWER_DOUBLE_CLICK_MS) {
-    pendingPowerClickAt = 0;
-    mappedInputManager.setPowerClickFrame(true);
-  }
 #endif
+
+  // The control centre's Sleep tile, honoured here rather than in the panel so
+  // the panel has already been popped by the time the stack is torn down.
+  if (deviceSleepRequested) {
+    deviceSleepRequested = false;
+    enterDeepSleep();
+    return;
+  }
 
   const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
   if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
@@ -804,7 +714,13 @@ void loop() {
   static bool powerReleasedSinceWake = false;
   if (!gpio.isPressed(HalGPIO::BTN_POWER)) powerReleasedSinceWake = true;
 
-  if (powerReleasedSinceWake && millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
+  // Boards on the gesture scheme spend their power hold on Back, so holding the
+  // button must never sleep the device out from under it -- Sleep is a control
+  // centre tile there. An explicit Sleep binding still wins: that is the user
+  // asking for the old behaviour back, and it takes the gesture scheme with it.
+  const bool powerHoldSleeps = !CrossPointSettings::usesPowerGestures() ||
+                               SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP;
+  if (powerHoldSleeps && powerReleasedSinceWake && millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
       gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
     // If the screenshot combination is potentially being pressed, don't sleep
     if (gpio.isPressed(HalGPIO::BTN_DOWN)) {

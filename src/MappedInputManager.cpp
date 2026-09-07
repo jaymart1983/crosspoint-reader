@@ -19,9 +19,87 @@ bool MappedInputManager::touchInputEnabled = true;
 
 void MappedInputManager::update() const {
   gpio.update();
+  // Before any consumer reads a button this frame: the chord machine decides
+  // which side-key edges are visible at all (see readKey below).
+  updateSideCombo();
   for (uint8_t value = 0; value <= static_cast<uint8_t>(Button::ScreenDown); ++value) {
     if (!isPressed(static_cast<Button>(value))) longPressFiredButtons &= ~(1u << value);
   }
+}
+
+// Left + Right chord detection. See the header for why a chord on these two
+// keys has to be resolved by waiting rather than by looking at one frame.
+void MappedInputManager::updateSideCombo() const {
+  sideComboFrame = false;
+  sideEmitPress = 0;
+  // A release parked by the Replay state last frame is published now, on its own
+  // frame, so its press (published on the previous one) is never seen alongside it.
+  sideEmitRelease = sideReleaseDue;
+  sideReleaseDue = 0;
+  if (sideComboState == SideCombo::Replay) {
+    sideComboState = SideCombo::Idle;
+    return;
+  }
+  if (!gpio.hasTouch()) return;
+
+  const bool up = gpio.isPressed(HalGPIO::BTN_UP);
+  const bool down = gpio.isPressed(HalGPIO::BTN_DOWN);
+
+  if (sideComboState == SideCombo::Chord) {
+    // Both keys stay swallowed until the whole contact is over, so the lift of
+    // the second finger cannot turn a page.
+    if (!up && !down) sideComboState = SideCombo::Idle;
+    return;
+  }
+
+  if (sideComboState == SideCombo::Armed) {
+    if (up && down) {
+      sideComboState = SideCombo::Chord;
+      sideComboFrame = true;
+      return;
+    }
+    const bool armedStillDown = sideComboArmedKey == HalGPIO::BTN_UP ? up : down;
+    if (!armedStillDown) {
+      // Pressed and released inside the window: a genuine, very fast tap. Give
+      // it its press now and its release next frame.
+      sideComboState = SideCombo::Replay;
+      sideEmitPress = sideKeyMask(sideComboArmedKey);
+      sideReleaseDue = sideKeyMask(sideComboArmedKey);
+      return;
+    }
+    if (millis() - sideComboArmedAt >= SIDE_COMBO_WINDOW_MS) {
+      // Nobody joined: a solo press after all, republished one window late.
+      sideComboState = SideCombo::Idle;
+      sideEmitPress = sideKeyMask(sideComboArmedKey);
+    }
+    return;
+  }
+
+  const bool upEdge = gpio.wasPressed(HalGPIO::BTN_UP);
+  const bool downEdge = gpio.wasPressed(HalGPIO::BTN_DOWN);
+  if (!upEdge && !downEdge) return;
+  // Both edges in one frame, or one key arriving on top of a key that is already
+  // down (the window closed on it first, so its page turn has already happened --
+  // opening the panel is still the intent that matters).
+  if ((upEdge && downEdge) || (upEdge && down) || (downEdge && up)) {
+    sideComboState = SideCombo::Chord;
+    sideComboFrame = true;
+    return;
+  }
+  sideComboState = SideCombo::Armed;
+  sideComboArmedAt = millis();
+  sideComboArmedKey = upEdge ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN;
+}
+
+bool MappedInputManager::readKey(const uint8_t index, bool (HalGPIO::*fn)(uint8_t) const) const {
+  const uint8_t bit = sideKeyMask(index);
+  if (bit == 0) return (gpio.*fn)(index);
+  if (fn == &HalGPIO::wasPressed && (sideEmitPress & bit) != 0) return true;
+  if (fn == &HalGPIO::wasReleased && (sideEmitRelease & bit) != 0) return true;
+  // Anything the chord machine has not republished itself is invisible while a
+  // window is open, while the chord owns the contact, and on the replay frame.
+  if (sideComboState != SideCombo::Idle) return false;
+  return (gpio.*fn)(index);
 }
 
 bool MappedInputManager::isNavDirectionSwapped() const {
@@ -70,22 +148,22 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
   switch (button) {
     case Button::Back:
       // Logical Back maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonBack);
+      return readKey(SETTINGS.frontButtonBack, fn);
     case Button::Confirm:
       // Logical Confirm maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonConfirm);
+      return readKey(SETTINGS.frontButtonConfirm, fn);
     case Button::Left:
       // Logical Left maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonLeft);
+      return readKey(SETTINGS.frontButtonLeft, fn);
     case Button::Right:
       // Logical Right maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonRight);
+      return readKey(SETTINGS.frontButtonRight, fn);
     case Button::Up:
       // Side buttons remain fixed for Up/Down.
-      return (gpio.*fn)(HalGPIO::BTN_UP);
+      return readKey(HalGPIO::BTN_UP, fn);
     case Button::Down:
       // Side buttons remain fixed for Up/Down.
-      return (gpio.*fn)(HalGPIO::BTN_DOWN);
+      return readKey(HalGPIO::BTN_DOWN, fn);
     case Button::Power:
       // Power button bypasses remapping.
       return (gpio.*fn)(HalGPIO::BTN_POWER);
@@ -96,12 +174,14 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       // PREV_NEXT default puts page-up on Left and page-down on Right. None of
       // this reads the touchscreen gate: the side keys keep turning pages with
       // the glass switched off, which is the whole point of being able to
-      // switch it off.
+      // switch it off. Pressed TOGETHER they are the control-centre chord
+      // instead -- readKey() holds a single side press for one short window so
+      // the two cannot be confused (see updateSideCombo).
       switch (sideLayout) {
         case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(isNavDirectionSwapped() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP);
+          return readKey(isNavDirectionSwapped() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP, fn);
         case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(isNavDirectionSwapped() ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
+          return readKey(isNavDirectionSwapped() ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN, fn);
         case CrossPointSettings::SIDE_BUTTONS_DISABLED:
         default:
           return false;
@@ -110,9 +190,9 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       // Reader page navigation uses side buttons and can be swapped via settings.
       switch (sideLayout) {
         case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(isNavDirectionSwapped() ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN);
+          return readKey(isNavDirectionSwapped() ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN, fn);
         case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(isNavDirectionSwapped() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP);
+          return readKey(isNavDirectionSwapped() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP, fn);
         case CrossPointSettings::SIDE_BUTTONS_DISABLED:
         default:
           return false;
@@ -316,19 +396,18 @@ bool MappedInputManager::wasHomeGesture() const {
 }
 
 bool MappedInputManager::wasHomeKeyHold() const {
-  // While the touchscreen is switched off the Home-key hold is reserved for the
-  // five-second touch-rescue gesture in main.cpp, so it must not also run the
-  // reader long-press action on the way there. With touch alive it keeps its
-  // normal job.
-  return gpio.hasHomeKey() && touchInputEnabled && gpio.wasHomeKeyLongPressed();
+  // Not gated on the touchscreen: the Home key is a separate signal on the touch
+  // controller and stays live with the glass switched off, so its long-press
+  // action keeps working there like the side keys do.
+  return gpio.hasHomeKey() && gpio.wasHomeKeyLongPressed();
 }
 
 #if FREEINK_CAP_TOUCH
 bool MappedInputManager::wasPowerShortClick() const {
   if (!gpio.hasTouch()) return false;
-  // Gesture boards get the deferred event from main.cpp -- their raw release is
-  // still ambiguous at the moment it happens. Other touch boards can act on the
-  // release directly, bounded by the same click ceiling.
+  // Gesture boards get the event from main.cpp's decoder, which is the only
+  // place that knows whether the release was under the click ceiling. Other
+  // touch boards can act on the release directly, bounded by the same ceiling.
   if (CrossPointSettings::usesPowerGestures()) return powerClickFrame;
   return gpio.wasReleased(HalGPIO::BTN_POWER) &&
          gpio.getPowerButtonHeldTime() <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS;
@@ -355,8 +434,8 @@ bool MappedInputManager::wasReleased(const Button button) const {
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
   // On gesture boards the raw power release belongs to the decoder in main.cpp,
   // which republishes it as powerClickFrame once it knows the press really was a
-  // click. Returning the raw edge here as well would let a Back or Sleep hold
-  // also fire whatever the short-click action happens to be.
+  // click. Returning the raw edge here as well would let a Back hold also fire
+  // whatever the short-click action happens to be.
   if (button == Button::Power && CrossPointSettings::usesPowerGestures()) return powerClickFrame;
 #endif
   return mapButton(button, &HalGPIO::wasReleased);

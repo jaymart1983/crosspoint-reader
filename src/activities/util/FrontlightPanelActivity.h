@@ -5,14 +5,21 @@
 #include "components/UiAppHost.h"
 #include "util/ButtonNavigator.h"
 
-// Top-anchored control center opened by a top-edge down-swipe, a status-bar tap,
-// or a button bound to "Control Center" (iOS Control Center style): a grabber,
-// the frontlight brightness/warmth sliders (on boards with a light), and a grid
-// of quick-setting tiles — night mode, ghost-cleanup refresh, reading
-// orientation, and reader touch controls on/off. The
-// frontlight controls are always there: they are what the panel is for. Pure
-// 1-bit: no dithered fills, selection reads as a filled tile. The grabber sits
-// along the panel's bottom edge, the edge the sheet is dragged from.
+// Top-anchored control center opened by a status-bar tap or by the Left+Right
+// side-key chord (iOS Control Center style): a grabber, the frontlight
+// brightness/warmth sliders (on boards with a light), and a grid of
+// quick-setting tiles — night mode, ghost-cleanup refresh, reading orientation,
+// frontlight, touchscreen on/off, sleep, settings and home. The frontlight
+// controls are always there: they are what the panel is for. Pure 1-bit: no
+// dithered fills, a tile whose setting is on reads as a filled tile. The
+// grabber sits along the panel's bottom edge, the edge the sheet is dragged
+// from.
+//
+// This panel is also the recovery screen for a device whose touchscreen has
+// been switched off — the Touch tile is the only way back on — so it has to be
+// fully workable from buttons alone: the chord opens and closes it, the
+// navigation keys move a tile cursor, and Confirm (a power tap on the X4 Pro)
+// activates the focused tile.
 class FrontlightPanelActivity final : public Activity, private UiAppHost {
   ButtonNavigator buttonNavigator;
 
@@ -29,17 +36,39 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // reflected user intent in the first place.
   bool lightOnChanged = false;
   bool draggingSlider = false;
-  // The touch tile toggles SETTINGS.touchReaderControls between off and this
-  // remembered mode, so a Swipe or Inverted Tap user gets their mode back
-  // rather than the Tap default. Seeded from the setting in onEnter().
-  uint8_t touchModeRestore = CrossPointSettings::TOUCH_READER_ON;
   int panelBottom = 0;
 
-  // Quick-setting tiles, in grid order (2 columns): night mode, refresh,
-  // orientation, touch, then the two navigation tiles this panel owes the user
-  // now that it is the only top-centre entry point — Settings and Home. Fixed
-  // set — shown on touch boards, absent elsewhere.
-  static constexpr int kTileCount = 6;
+  // Quick-setting tiles. The id is what runTile() dispatches on and what the
+  // grid carries as its per-item value, so it stays stable while the grid ORDER
+  // (below) and the set of visible tiles are free to change — hiding the
+  // frontlight tile on a board with no light renumbers nothing.
+  enum TileId : int16_t {
+    TILE_NIGHT = 0,
+    TILE_REFRESH = 1,
+    TILE_ORIENTATION = 2,
+    TILE_TOUCH = 3,
+    TILE_SETTINGS = 4,
+    TILE_HOME = 5,
+    TILE_SLEEP = 6,
+    TILE_LIGHT = 7,
+  };
+  static constexpr int kMaxTiles = 8;
+  // Grid order, filled by buildTileOrder() in onEnter(): the visible subset of
+  // the ids above, in the order they are laid out. Two columns, so this reads
+  // down the page in pairs.
+  int16_t tileIds[kMaxTiles] = {};
+  int tileCount = 0;
+  // Index into tileIds of the button cursor, or -1 while nothing is focused.
+  // Only meaningful (and only drawn) while the touchscreen is switched off.
+  int focusedTile = -1;
+  // The sheet is a portrait card sized against the whole screen height, and it
+  // can now be opened from the reader (the Left+Right chord works everywhere),
+  // which may have the renderer turned. So the panel forces portrait for as long
+  // as it is up and puts the frame back exactly as it found it on the way out --
+  // a rotated reader underneath re-applies its own orientation on its next
+  // loop() only when SETTINGS changed, so leaving the frame turned would strand
+  // it with a layout built for the other frame size.
+  GfxRenderer::Orientation savedOrientation = GfxRenderer::Orientation::Portrait;
 
   // fui::SliderRowProps and fui::TileGridProps embed a 324-byte fui::StyleSet,
   // so the props the render path fills in live here instead of on the stack
@@ -49,7 +78,7 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   // constructed default.
   freeink::ui::SliderRowProps rowProps;
   freeink::ui::TileGridProps gridProps;
-  freeink::ui::TileGridItem gridItems[kTileCount];
+  freeink::ui::TileGridItem gridItems[kMaxTiles];
 
   static void panelScreen(UiScreen& screen, void* user);
   static void onBrightnessEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -66,6 +95,17 @@ class FrontlightPanelActivity final : public Activity, private UiAppHost {
   void addSliderRow(UiScreen& screen, const char* label, uint8_t value, freeink::ui::ActionId sliderAction,
                     freeink::ui::ActionId stepAction, bool showToggle);
   int computePanelBottom() const;
+  // Fills tileIds/tileCount with the tiles this board actually shows.
+  void buildTileOrder();
+  // Fills gridProps.styles in place. Written field by field rather than through
+  // fui::tileGridStyles() so no 324-byte StyleSet ever lands on the stack
+  // (AGENTS.md: locals stay under 256 bytes) — gridProps is already a member for
+  // exactly that reason.
+  void applyTileStyles(uint8_t radius);
+  // True while the panel has to be driven from buttons: the glass is off, so
+  // the navigation keys move the tile cursor instead of stepping brightness.
+  bool buttonNavActive() const;
+  void moveFocus(int delta);
   void adjustBrightness(int delta);
   void adjustWarmth(int delta);
   void toggleLight();

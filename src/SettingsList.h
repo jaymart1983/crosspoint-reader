@@ -340,8 +340,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         // reboot or a wake, so the "off" state lasts only for this session. The
         // nullptr key keeps it out of settings.json and out of the web API for
         // the same reason. Two values, so selecting it flips in place instead of
-        // opening an option popup. If it is switched off with no other way back
-        // in, hold the capacitive Home key for five seconds (see main.cpp).
+        // opening an option popup. The control centre's Touch tile drives this
+        // same gate; if it is switched off with no other way back in, press the
+        // two side keys TOGETHER to open the control centre and turn it back on
+        // (see MappedInputManager::updateSideCombo).
         SettingInfo::DynamicEnum(
             StrId::STR_TOUCHSCREEN, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
             []() -> uint8_t { return MappedInputManager::isTouchInputEnabled() ? 1 : 0; },

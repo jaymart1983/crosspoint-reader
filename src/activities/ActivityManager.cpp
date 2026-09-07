@@ -104,6 +104,23 @@ void ActivityManager::loop() {
       return;
     }
 
+    // Control-center entry, button route: Left + Right pressed together, from
+    // ANY ordinary screen including the reader. This is the one path that does
+    // not need the glass, so it is what makes turning the touchscreen off
+    // recoverable -- the chord opens the panel, the side keys move the tile
+    // cursor and a power tap selects. MappedInputManager holds a single side
+    // press for one short window so the chord can never read as a page turn
+    // (see updateSideCombo); here it only has to be routed.
+    if (mappedInput.consumeControlCenterChord() && mappedInput.hasTouch() && currentActivity->name != "Boot" &&
+        currentActivity->name != "Sleep") {
+      if (currentActivity->name == "FrontlightPanel") {
+        popActivity();
+      } else {
+        pushActivity(std::make_unique<FrontlightPanelActivity>(renderer, mappedInput));
+      }
+      return;
+    }
+
     // Control-center entry: a tap on the TOP-CENTRE of the status-bar band of
     // the top-level screens opens it. Deliberately touch-only and centre-only:
     // the top-edge down-swipe that used to open it as well is gone (it fought

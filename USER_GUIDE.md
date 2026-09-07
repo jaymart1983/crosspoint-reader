@@ -75,11 +75,11 @@ Alternatively, while reading a book, press the **Confirm** button to open the re
 
 The X4 Pro has a built-in frontlight with adjustable brightness and warmth. It is controlled from a swipe panel rather than the Settings menu:
 
-* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, Touch, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
-* **Quick toggle:** **Double-click** the **Power** button to turn the frontlight on or off without opening the panel.
+* **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen — or press the **Left and Right side keys together**, which works from any screen including while reading. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, **Frontlight**, **Touch**, **Sleep**, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
+* **Quick toggle:** The **Frontlight** tile in the control centre turns the light on or off in one tap.
 
 > [!NOTE]
-> Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the control centre is the only place to adjust them. The on/off state can also be toggled with the Power-button double-click above.
+> Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the control centre is the only place to adjust them.
 
 If the frontlight doesn't come back on after the device wakes from sleep, check **Restore Light on Wake** in **[Display Settings](#361-display)** (on by default). Turning it off is intentional if you'd rather have the light stay off on wake and switch it on yourself each time — but it's easy to forget you changed it.
 
@@ -96,35 +96,42 @@ To reboot the device (for example after a firmware update or if it's frozen), pr
 
 ### Power Button Gestures (X4 Pro)
 
-The X4 Pro has no physical Back or Confirm key, so its Power button carries four
-separate gestures:
+The X4 Pro has no physical Back or Confirm key, so its Power button carries the
+two roles they would have had:
 
 | Gesture | Action |
 | --- | --- |
-| Single tap | Select / confirm |
-| Double tap | Frontlight on / off |
+| Tap | Select / confirm |
 | Hold ~1 second | Back |
-| Hold 5 seconds | Sleep |
 
-A single tap is dispatched a fraction of a second after you lift your finger —
-the device has to wait to see whether a second tap is coming. Back happens when
-you *release* a hold of about a second or more, so holding on past it all the way
-to five seconds sleeps the device without navigating back on the way.
+Both happen when you lift your finger, so a tap selects immediately. Holding for
+somewhere between the two — roughly three quarters of a second — deliberately
+does nothing: a slow tap and a short hold cannot be told apart there, and a Back
+you did not ask for is worse than nothing happening.
+
+The Power button no longer sleeps the device. **Sleep** is a tile in the control
+centre instead, which is what leaves the whole "held" range to Back.
 
 The two side keys are page navigation: **Left turns the page up (back)** and
 **Right turns the page down (forward)**. They work whether or not the
-touchscreen is switched on.
+touchscreen is switched on. Pressed **together** they open and close the control
+centre.
 
 ### Turning the Touchscreen Off
 
-**Settings -> Controls -> Touchscreen** switches the glass off — useful when
-resting a palm on the screen while reading. The side keys and the Power-button
-gestures above keep working, so the device stays fully usable.
+The **Touch** tile in the control centre switches the glass off — useful when
+resting a palm on the screen while reading. (**Settings -> Controls ->
+Touchscreen** is the same switch.) The side keys and the Power-button gestures
+above keep working, so the device stays usable.
+
+With touch off, the control centre becomes a button-driven menu: press **Left
+and Right together** to open it, use the side keys to move the highlight from
+tile to tile, and **tap Power** to select. The Touch tile turns the glass back
+on. In this mode the side keys move the highlight rather than stepping
+brightness.
 
 This is deliberately not saved: the touchscreen always comes back on after a
-reboot or a wake. If you need it back sooner, **hold the capacitive Home key for
-five seconds**. The Home key is never routed through the touch switch, so it
-still works with the glass off.
+reboot or a wake, so it can never lock you out.
 
 ### First Launch
 

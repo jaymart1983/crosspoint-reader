@@ -11,6 +11,7 @@
 #include <iterator>
 
 #include "CrossPointSettings.h"
+#include "DeviceSleep.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -59,6 +60,9 @@ FrontlightPanelActivity::FrontlightPanelActivity(GfxRenderer& renderer, MappedIn
 void FrontlightPanelActivity::onEnter() {
   Activity::onEnter();
 
+  savedOrientation = renderer.getOrientation();
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+
   // A stored 0% predates the 1% floor (or came from the web settings): show it
   // as the floor rather than a level the slider can no longer produce. onExit
   // persists that, which is the intent — 0 is not a brightness any more.
@@ -67,11 +71,11 @@ void FrontlightPanelActivity::onEnter() {
   lightOn = Frontlight.isOn();
   lightOnChanged = false;
 
-  // Seed the touch tile's restore mode from the live setting, so toggling off
-  // and back on within this session returns to the mode the user had.
-  if (SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF) {
-    touchModeRestore = SETTINGS.touchReaderControls;
-  }
+  buildTileOrder();
+  // A panel opened while the glass is already off is being driven from buttons,
+  // so it must come up with a cursor on screen — an unfocused grid would leave
+  // the user pressing keys at nothing.
+  focusedTile = buttonNavActive() && tileCount > 0 ? 0 : -1;
 
   resetUi();
   app.on(ACTION_BRIGHTNESS, &FrontlightPanelActivity::onBrightnessEvent, this);
@@ -81,6 +85,63 @@ void FrontlightPanelActivity::onEnter() {
   app.on(ACTION_WARMTH_STEP, &FrontlightPanelActivity::onWarmthStepEvent, this);
   app.on(ACTION_TILE, &FrontlightPanelActivity::onTileEvent, this);
   app.setScreen(&FrontlightPanelActivity::panelScreen, this);
+  requestUpdate();
+}
+
+// The tiles this board shows, in grid order. Two columns, so consecutive pairs
+// share a row: display, then the two hardware switches, then the three ways off
+// this screen.
+void FrontlightPanelActivity::buildTileOrder() {
+  tileCount = 0;
+  const auto add = [this](const TileId id) { tileIds[tileCount++] = id; };
+  add(TILE_NIGHT);
+  add(TILE_REFRESH);
+  add(TILE_ORIENTATION);
+  // A board with no light has nothing for this tile to toggle; the slider rows
+  // are hidden on it for the same reason.
+  if (Frontlight.present()) add(TILE_LIGHT);
+  add(TILE_TOUCH);
+  add(TILE_SLEEP);
+  add(TILE_SETTINGS);
+  add(TILE_HOME);
+}
+
+void FrontlightPanelActivity::applyTileStyles(const uint8_t radius) {
+  // The component's own 1-bit tile look (fui::tileGridStyles): an outlined card,
+  // filled solid when the setting the tile carries is on. Never a dithered grey.
+  fui::StyleSet& styles = gridProps.styles;
+  styles.explicitlySet = true;
+  styles.normal.background = fui::Paint::solid(fui::Color::White);
+  styles.normal.foreground = fui::Paint::solid(fui::Color::Black);
+  styles.normal.border = fui::Paint::solid(fui::Color::Black);
+  styles.normal.borderWidth = 2;
+  styles.normal.radius = radius;
+  styles.selected = styles.normal;
+  styles.selected.background = fui::Paint::solid(fui::Color::Black);
+  styles.selected.foreground = fui::Paint::solid(fui::Color::White);
+  styles.disabled = styles.normal;
+  // On top of that, the button cursor: a heavy border over the plain card when
+  // the tile is off and over the filled card when it is on, so focus and on/off
+  // stay independently legible without inventing a second shade. StyleSet's
+  // resolve() checks Active before Focused before Checked, which is why
+  // "focused AND on" has to travel as StateActive.
+  styles.focused = styles.normal;
+  styles.focused.borderWidth = 6;
+  styles.active = styles.selected;
+  styles.active.borderWidth = 6;
+}
+
+bool FrontlightPanelActivity::buttonNavActive() const {
+  return mappedInput.hasTouch() && !MappedInputManager::isTouchInputEnabled();
+}
+
+void FrontlightPanelActivity::moveFocus(const int delta) {
+  if (tileCount <= 0) return;
+  if (focusedTile < 0) {
+    focusedTile = delta >= 0 ? 0 : tileCount - 1;
+  } else {
+    focusedTile = (focusedTile + delta + tileCount) % tileCount;
+  }
   requestUpdate();
 }
 
@@ -102,6 +163,7 @@ void FrontlightPanelActivity::persistLightSettings() {
 
 void FrontlightPanelActivity::onExit() {
   persistLightSettings();
+  renderer.setOrientation(savedOrientation);
   Activity::onExit();
 }
 
@@ -140,9 +202,9 @@ void FrontlightPanelActivity::onTileEvent(const fui::ActionEvent& event, void* u
   static_cast<FrontlightPanelActivity*>(user)->runTile(event.value);
 }
 
-void FrontlightPanelActivity::runTile(const int idx) {
-  switch (idx) {
-    case 0:  // Night mode (inverted output polarity, applied to the whole UI)
+void FrontlightPanelActivity::runTile(const int id) {
+  switch (id) {
+    case TILE_NIGHT:  // Night mode (inverted output polarity, applied to the whole UI)
       SETTINGS.screenInverted = SETTINGS.screenInverted ? 0 : 1;
       SETTINGS.saveToFile();
       // Inversion rewrites every pixel; take the clean waveform so the panel
@@ -150,14 +212,14 @@ void FrontlightPanelActivity::runTile(const int idx) {
       cleanRefreshPending = true;
       requestUpdate();
       break;
-    case 1:  // Ghost-cleanup refresh of the whole frame
+    case TILE_REFRESH:  // Ghost-cleanup refresh of the whole frame
       // Refreshing with the panel still up would clean a frame the user is
       // about to dismiss anyway: drop the panel first and let the repaint of
       // the screen underneath carry the clean waveform instead.
       renderer.promoteNextRefresh(HalDisplay::FULL_REFRESH);
       close();
       break;
-    case 2:  // Cycle the reading orientation
+    case TILE_ORIENTATION:  // Cycle the reading orientation
       SETTINGS.orientation = static_cast<uint8_t>((SETTINGS.orientation + 1) % 4);
       SETTINGS.saveToFile();
       // Only the setting changes: turning the renderer cropped the portrait-only
@@ -169,25 +231,48 @@ void FrontlightPanelActivity::runTile(const int idx) {
     // absolute destinations, not a step back into whatever was underneath.
     // replaceActivity() runs this activity's onExit(), so the live
     // brightness/warmth still persist on the way out.
-    case 4:  // Settings
-      activityManager.goToSettings();
-      break;
-    case 5:  // Home
-      activityManager.goHome();
-      break;
-    case 3:  // Touch reader controls (for reading with the palm on the glass)
-      // Toggles the existing Settings -> Controls option, nothing lower-level:
-      // that setting only governs the reader's tap/swipe handling, so the
-      // panel's own gestures (including the swipe that reopens it) keep
-      // working while it is off. Off remembers the mode (Tap/Swipe/Inverted
-      // Tap) so toggling back does not stomp the user's choice.
-      if (SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF) {
-        touchModeRestore = SETTINGS.touchReaderControls;
-        SETTINGS.touchReaderControls = CrossPointSettings::TOUCH_READER_OFF;
+    case TILE_SETTINGS:
+    case TILE_HOME:
+      // Both are portrait screens, so the frame must NOT be put back the way the
+      // panel found it: the chord can open this panel over a reader that has the
+      // renderer turned, and restoring that on the way out would draw Settings
+      // or Home rotated.
+      savedOrientation = GfxRenderer::Orientation::Portrait;
+      if (id == TILE_SETTINGS) {
+        activityManager.goToSettings();
       } else {
-        SETTINGS.touchReaderControls = touchModeRestore;
+        activityManager.goHome();
       }
-      SETTINGS.saveToFile();
+      break;
+    case TILE_LIGHT:  // Frontlight on/off — the same switch as the lamp button
+                      // on the brightness row, reachable from a button here.
+      toggleLight();
+      break;
+    case TILE_SLEEP:
+      // Close first, then ask main.cpp to sleep at the top of its next loop:
+      // enterDeepSleep() replaces the whole activity stack, so calling it from
+      // this handler would delete the panel underneath its own event dispatch.
+      // Popping here also lets onExit() persist the live brightness/warmth.
+      close();
+      requestDeviceSleep();
+      break;
+    case TILE_TOUCH:
+      // The MASTER touchscreen gate in MappedInputManager, which is what every
+      // tap, swipe and long-press in the firmware is read through — NOT
+      // SETTINGS.touchReaderControls, which only governs the reader's page-turn
+      // tap zones and is what this tile used to toggle (hence "toggling it did
+      // nothing"). Runtime-only and never persisted, so a reboot or a wake
+      // always brings the glass back; the Left+Right chord is the way back
+      // sooner. Switching it off from here hands the panel straight to the
+      // button cursor, so the screen that owns the switch stays usable.
+      MappedInputManager::setTouchInputEnabled(!MappedInputManager::isTouchInputEnabled());
+      LOG_INF("TOUCH", "Touchscreen %s from the control centre",
+              MappedInputManager::isTouchInputEnabled() ? "enabled" : "disabled");
+      if (buttonNavActive() && focusedTile < 0) {
+        for (int i = 0; i < tileCount; ++i) {
+          if (tileIds[i] == TILE_TOUCH) focusedTile = i;
+        }
+      }
       requestUpdate();
       break;
     default:
@@ -267,14 +352,40 @@ void FrontlightPanelActivity::loop() {
     close();
     return;
   }
+
+  // With the glass off the panel is driven entirely from keys: the navigation
+  // pair moves the tile cursor and Confirm activates it. Brightness stepping
+  // gives way to that on purpose — the tile grid is the part that has to be
+  // reachable (it holds the switch that turns touch back on), and the
+  // Frontlight tile still covers on/off, which is the half of the light that
+  // matters when you cannot see a slider to drag.
+  if (buttonNavActive()) {
+    // Confirm covers the X4 Pro's power tap through SHORT_PWRBTN::PWR_CONFIRM,
+    // its default. The raw power click is accepted as well so this screen still
+    // activates a tile when the short-click action has been bound to something
+    // else -- it is the only way back to a working touchscreen, so it must not
+    // depend on a setting the user is free to change.
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Power)) {
+      if (focusedTile >= 0 && focusedTile < tileCount) runTile(tileIds[focusedTile]);
+      return;
+    }
+    buttonNavigator.onPressAndContinuous(ButtonNavigator::getPreviousButtons(), [this] { moveFocus(-1); });
+    buttonNavigator.onPressAndContinuous(ButtonNavigator::getNextButtons(), [this] { moveFocus(1); });
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     toggleLight();
     return;
   }
 
-  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left},
+  // NavPrevious/NavNext rather than the front Left/Right pair: on a board whose
+  // only keys are the two side keys (X4 Pro) the front roles map to buttons that
+  // do not exist, so the sliders were unreachable from hardware entirely.
+  buttonNavigator.onPressAndContinuous(ButtonNavigator::getPreviousButtons(),
                                        [this] { adjustBrightness(-BRIGHTNESS_STEP); });
-  buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right},
+  buttonNavigator.onPressAndContinuous(ButtonNavigator::getNextButtons(),
                                        [this] { adjustBrightness(BRIGHTNESS_STEP); });
 }
 
@@ -294,10 +405,10 @@ int FrontlightPanelActivity::computePanelBottom() const {
     }
     y += tokens.spaceSm;
   }
-  // Tiles are touch targets, so a buttons-only board gets no grid and the
-  // sheet is exactly the frontlight controls.
-  const int tileCount = mappedInput.hasTouch() ? kTileCount : 0;
-  y += fui::tileGridHeight(static_cast<uint16_t>(tileCount), kTileCols, kTileHeight, kTileGap);
+  // Tiles are for touch boards: they are the finger-sized quick settings, and on
+  // a buttons-only board the sheet is exactly the frontlight controls.
+  const int tiles = mappedInput.hasTouch() ? tileCount : 0;
+  y += fui::tileGridHeight(static_cast<uint16_t>(tiles), kTileCols, kTileHeight, kTileGap);
   // The sheet's grabber band: content margin + grabber + air to the edge.
   // buildPanelScreen() feeds the same theme spacings into SheetProps.
   y += tokens.spaceLg + kGrabberHeight + tokens.spaceLg + tokens.spaceMd;
@@ -382,38 +493,81 @@ void FrontlightPanelActivity::buildPanelScreen(UiScreen& screen) {
     screen.spacer(theme.spaceSm);
   }
 
-  // Quick-setting tiles. Two columns of finger-sized cards; a tile whose
-  // setting is currently on draws filled (StateChecked -> selected style).
-  // Touch boards only — the tiles are touch targets.
+  // Quick-setting tiles. Two columns of finger-sized cards; a tile whose setting
+  // is currently on draws filled (StateChecked -> the selected style), and the
+  // button cursor draws as a heavy outline on top of that. Touch boards only —
+  // the tiles are sized as touch targets.
   if (mappedInput.hasTouch()) {
     static constexpr StrId kOrientNames[4] = {StrId::STR_PORTRAIT, StrId::STR_LANDSCAPE_CW,
                                               StrId::STR_ORIENTATION_INVERTED, StrId::STR_LANDSCAPE_CCW};
     // The orientation tile is labelled with just the current mode ("Portrait"):
     // the mode names say what the tile is about on their own.
     const char* orientLabel = I18N.get(kOrientNames[SETTINGS.orientation % 4]);
-    // "Touch On" / "Touch Off", from the existing state strings: the label
-    // names the current state of the touch-reader-controls setting.
-    const bool touchOn = SETTINGS.touchReaderControls != CrossPointSettings::TOUCH_READER_OFF;
+    // "Touch On" / "Touch Off", from the existing state strings: the label names
+    // the live state of the master touchscreen gate this tile drives.
+    const bool touchOn = MappedInputManager::isTouchInputEnabled();
     char touchLabel[48];
     snprintf(touchLabel, sizeof(touchLabel), "%s %s", tr(STR_TOUCH_TOGGLE),
              I18N.get(touchOn ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF));
 
-    const char* labels[kTileCount] = {tr(STR_NIGHT_MODE), tr(STR_FORCE_REFRESH), orientLabel, touchLabel,
-                                      tr(STR_SETTINGS_TITLE), tr(STR_EOB_HOME)};
-    const fui::State states[kTileCount] = {SETTINGS.screenInverted ? fui::StateChecked : fui::StateNormal,
-                                           fui::StateNormal, fui::StateNormal,
-                                           // Filled when touch reader controls are OFF — the non-default,
-                                           // attention-worthy state.
-                                           touchOn ? fui::StateNormal : fui::StateChecked, fui::StateNormal,
-                                           fui::StateNormal};
-
-    for (int id = 0; id < kTileCount; ++id) {
-      gridItems[id].label = labels[id];
-      gridItems[id].value = static_cast<int16_t>(id);
-      gridItems[id].state = states[id];
+    // The cursor is only shown while the panel is actually being driven from
+    // keys; with touch alive a focus ring would just be a second selection
+    // indicator competing with the finger.
+    const bool showFocus = buttonNavActive();
+    for (int slot = 0; slot < tileCount; ++slot) {
+      const int16_t id = tileIds[slot];
+      const char* label = nullptr;
+      bool checked = false;
+      switch (id) {
+        case TILE_NIGHT:
+          label = tr(STR_NIGHT_MODE);
+          checked = SETTINGS.screenInverted != 0;
+          break;
+        case TILE_REFRESH:
+          label = tr(STR_FORCE_REFRESH);
+          break;
+        case TILE_ORIENTATION:
+          label = orientLabel;
+          break;
+        case TILE_LIGHT:
+          label = tr(STR_FRONTLIGHT);
+          checked = lightOn;
+          break;
+        case TILE_TOUCH:
+          label = touchLabel;
+          // Filled when touch is OFF — the non-default, attention-worthy state.
+          checked = !touchOn;
+          break;
+        case TILE_SLEEP:
+          label = tr(STR_SLEEP);
+          break;
+        case TILE_SETTINGS:
+          label = tr(STR_SETTINGS_TITLE);
+          break;
+        case TILE_HOME:
+        default:
+          label = tr(STR_EOB_HOME);
+          break;
+      }
+      const bool focused = showFocus && slot == focusedTile;
+      // Active is the one style slot that can carry "focused AND on" — see
+      // applyTileStyles().
+      fui::State state = fui::StateNormal;
+      if (checked && focused) {
+        state = fui::StateActive;
+      } else if (focused) {
+        state = fui::StateFocused;
+      } else if (checked) {
+        state = fui::StateChecked;
+      }
+      gridItems[slot].label = label;
+      gridItems[slot].value = id;
+      gridItems[slot].state = state;
     }
+
+    applyTileStyles(theme.controlRadius);
     gridProps.items = gridItems;
-    gridProps.count = static_cast<uint16_t>(kTileCount);
+    gridProps.count = static_cast<uint16_t>(tileCount);
     gridProps.action = ACTION_TILE;
     gridProps.tileHeight = kTileHeight;
     gridProps.gap = kTileGap;
