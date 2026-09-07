@@ -680,6 +680,10 @@ void loop() {
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);
+  // Change-accumulation ghost cleanup. Cheap to re-assert every loop (a no-op
+  // unless the user just changed it) and this is the one place every screen,
+  // not just the reader, passes through.
+  renderer.setChangeBudgetPercent(SETTINGS.getGhostCleanupPercent());
 
   if (Serial && millis() - lastMemPrint >= 10000) {
     LOG_INF("MEM", "Free: %d bytes, Total: %d bytes, Min Free: %d bytes, MaxAlloc: %d bytes", ESP.getFreeHeap(),

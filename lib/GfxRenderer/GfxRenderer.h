@@ -71,6 +71,33 @@ class GfxRenderer {
   // Swap in (and clear) the promoted mode, if one is pending.
   HalDisplay::RefreshMode applyPromotedRefresh(HalDisplay::RefreshMode refreshMode) const;
 
+  // --- Change budget (anti-ghosting) ---------------------------------------
+  // Ghosting tracks how much ink the panel has moved through DIFFERENTIAL
+  // (FAST) waveforms since the last clean one, not how many pages were turned.
+  // The reader's page cadence only counts page turns, so menus, popups and
+  // toolbars -- which push large partial updates and never touch that counter
+  // -- accumulate residue indefinitely. Every full-frame update therefore XORs
+  // the outgoing frame against the incoming one, counts the flipped pixels and
+  // adds them to changeAccumPixels_; when the running total crosses
+  // changeBudgetPixels_ the update is promoted to a clean HALF waveform and the
+  // total resets. Any clean waveform (however triggered) resets it too.
+  // changePrevFrame_ is a snapshot of the last frame handed to the panel, one
+  // framebuffer wide (~48 KB) and PSRAM-only: boards without PSRAM keep the old
+  // page-count-only behaviour rather than spend internal DRAM on it.
+  mutable uint8_t* changePrevFrame_ = nullptr;
+  mutable uint32_t changeAccumPixels_ = 0;
+  mutable bool changePrevValid_ = false;
+  mutable bool lastRefreshWasClean_ = false;
+  uint32_t changeBudgetPixels_ = 0;   // 0 = mechanism off
+  uint16_t changeBudgetPercent_ = 0;  // as configured, for the getter
+  // Fold the outgoing->incoming diff into the accumulator, refresh the
+  // snapshot, and return the mode the update should actually use.
+  HalDisplay::RefreshMode applyChangeBudget(HalDisplay::RefreshMode refreshMode) const;
+  // Word-wise XOR + popcount of frameBuffer against changePrevFrame_, updating
+  // the snapshot in the same pass. Returns the number of flipped pixels.
+  uint32_t diffAndSnapshotFrame() const;
+  void freeChangeSnapshot();
+
   // Tiled grayscale strip target. When active, drawPixel()/clearScreen()
   // operate on a caller-owned scratch holding one horizontal band of physical
   // rows [_stripY0, _stripY0 + _stripRows) (panelWidthBytes wide) instead of
@@ -125,7 +152,10 @@ class GfxRenderer {
  public:
   explicit GfxRenderer(HalDisplay& halDisplay)
       : display(halDisplay), renderMode(BW), orientation(Portrait), fadingFix(false) {}
-  ~GfxRenderer() { freeBwBufferChunks(); }
+  ~GfxRenderer() {
+    freeBwBufferChunks();
+    freeChangeSnapshot();
+  }
 
   // Setup
   void begin();  // must be called right after display.begin()
@@ -202,6 +232,28 @@ class GfxRenderer {
   void promoteNextRefresh(const HalDisplay::RefreshMode mode) const {
     promotedRefreshPending_ = true;
     promotedRefresh_ = mode;
+  }
+
+  // --- Change budget (anti-ghosting) ---------------------------------------
+  // How much of the panel may flip through differential (FAST) updates before
+  // the next update is promoted to a clean HALF waveform. 100 = one whole
+  // screenful of pixels; 0 turns the mechanism off (the pre-existing
+  // page-cadence-only behaviour). Cheap to call repeatedly: a value equal to
+  // the current one returns immediately. Allocates a ~48 KB PSRAM snapshot on
+  // first enable and stays off if that fails.
+  void setChangeBudgetPercent(uint16_t percentOfScreen);
+  uint16_t getChangeBudgetPercent() const { return changeBudgetPercent_; }
+  // Change accumulated since the last clean refresh, in percent of the panel.
+  uint16_t changeAccumulatedPercent() const;
+  // True when the update just pushed used a clean (non-FAST) waveform -- either
+  // because the caller asked for one or because the change budget promoted it.
+  // Lets a page-cadence counter restart instead of scheduling a second scrub
+  // right behind the one that already happened.
+  bool lastRefreshWasClean() const { return lastRefreshWasClean_; }
+  // Forget the accumulated change (the panel was cleaned behind our back).
+  void resetChangeBudget() const {
+    changeAccumPixels_ = 0;
+    changePrevValid_ = false;
   }
   // Non-blocking refresh: starts the waveform and returns so CPU work (e.g.
   // grayscale strip rendering) can overlap the panel's refresh time. The

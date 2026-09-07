@@ -407,6 +407,26 @@ int CrossPointSettings::getRefreshFrequency() const {
   }
 }
 
+uint16_t CrossPointSettings::getGhostCleanupPercent() const {
+  // Percent of the panel's pixels that may flip through fast differential
+  // updates before one is promoted to a clean waveform. Calibrated against a
+  // page turn, which flips roughly 10-20% of an 800x480 text page (ink coverage
+  // is ~5-10%, and a turn erases the old glyphs as well as painting the new
+  // ones): Normal lands the cleanup around every 8-12 pages, a little sooner
+  // than the 15-page default cadence, and much sooner in a menu-heavy session.
+  switch (ghostCleanup) {
+    case GHOST_CLEANUP_OFF:
+      return 0;
+    case GHOST_CLEANUP_LIGHT:
+      return 300;
+    case GHOST_CLEANUP_AGGRESSIVE:
+      return 75;
+    case GHOST_CLEANUP_NORMAL:
+    default:
+      return 150;
+  }
+}
+
 void CrossPointSettings::clearSdFontFamily() {
   sdFontFamilyName[0] = '\0';
   fontPointSize =

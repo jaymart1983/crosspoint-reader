@@ -178,6 +178,19 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     REFRESH_FREQUENCY_COUNT
   };
 
+  // Ghost cleanup: how much of the screen may change through fast differential
+  // updates before the next one is promoted to a clean waveform. Complements
+  // refreshFrequency, which counts reader page turns only -- menus, popups and
+  // toolbars never touched that counter, so a chrome-heavy session accumulated
+  // residue with nothing to clear it. Persisted by index; append only.
+  enum GHOST_CLEANUP {
+    GHOST_CLEANUP_OFF = 0,
+    GHOST_CLEANUP_LIGHT = 1,
+    GHOST_CLEANUP_NORMAL = 2,
+    GHOST_CLEANUP_AGGRESSIVE = 3,
+    GHOST_CLEANUP_COUNT
+  };
+
   // Short power button press actions. Persisted by index, so a new action MUST
   // be appended at the END here and at the end of the matching enumValues array
   // in SettingsList.h -- otherwise stored indices shift under existing saves.
@@ -382,6 +395,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t sleepTimeoutMinutes = 10;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
+  // Change-accumulation ghost cleanup (see GHOST_CLEANUP)
+  uint8_t ghostCleanup = GHOST_CLEANUP_NORMAL;
   uint8_t hyphenationEnabled = 0;
 
   // Reader screen margin settings
@@ -535,6 +550,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   float getReaderLineCompression() const;
   unsigned long getSleepTimeoutMs() const;
   int getRefreshFrequency() const;
+  // Change budget for GfxRenderer::setChangeBudgetPercent(): percent of the
+  // panel that may flip through fast updates before one is promoted to a clean
+  // waveform. 0 = off (page cadence only).
+  uint16_t getGhostCleanupPercent() const;
 };
 
 // Helper macro to access settings

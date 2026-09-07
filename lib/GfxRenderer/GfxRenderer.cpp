@@ -10,8 +10,16 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "FontCacheManager.h"
+
+#if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
+#include "esp_heap_caps.h"
+#define GFX_CHANGE_SNAPSHOT_PSRAM 1
+#else
+#define GFX_CHANGE_SNAPSHOT_PSRAM 0
+#endif
 
 namespace {
 
@@ -1679,15 +1687,148 @@ HalDisplay::RefreshMode GfxRenderer::applyPromotedRefresh(const HalDisplay::Refr
   return promotedRefresh_;
 }
 
+namespace {
+// SWAR popcount. Xtensa LX6/LX7 has no population-count instruction, and
+// __builtin_popcount() lowers to a libgcc call (__popcountsi2, a byte-table
+// lookup plus call overhead) -- inline SWAR is measurably cheaper in a loop
+// that runs 12000 times per update.
+inline uint32_t popcount32(uint32_t v) {
+  v = v - ((v >> 1) & 0x55555555u);
+  v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
+  v = (v + (v >> 4)) & 0x0F0F0F0Fu;
+  return (v * 0x01010101u) >> 24;
+}
+
+inline uint8_t* allocChangeSnapshot(const size_t bytes) {
+#if GFX_CHANGE_SNAPSHOT_PSRAM
+  // PSRAM only, deliberately: internal DRAM is the scarce resource on every
+  // board here, and a board without PSRAM is better off keeping the plain page
+  // cadence than losing 48 KB of DRAM to a ghosting heuristic.
+  return static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM));
+#else
+  (void)bytes;
+  return nullptr;
+#endif
+}
+}  // namespace
+
+void GfxRenderer::freeChangeSnapshot() {
+  if (changePrevFrame_ == nullptr) return;
+  free(changePrevFrame_);
+  changePrevFrame_ = nullptr;
+  changePrevValid_ = false;
+  changeAccumPixels_ = 0;
+}
+
+void GfxRenderer::setChangeBudgetPercent(const uint16_t percentOfScreen) {
+  if (percentOfScreen == changeBudgetPercent_) return;
+  changeBudgetPercent_ = percentOfScreen;
+  if (percentOfScreen == 0) {
+    changeBudgetPixels_ = 0;
+    freeChangeSnapshot();
+    return;
+  }
+  if (changePrevFrame_ == nullptr) {
+    changePrevFrame_ = allocChangeSnapshot(frameBufferSize);
+    changePrevValid_ = false;
+    changeAccumPixels_ = 0;
+    if (changePrevFrame_ == nullptr) {
+      LOG_DBG("GFX", "No PSRAM for the refresh change snapshot; page cadence only");
+      changeBudgetPixels_ = 0;
+      return;
+    }
+  }
+  const uint32_t pixels = static_cast<uint32_t>(panelWidth) * panelHeight;
+  changeBudgetPixels_ = static_cast<uint32_t>((static_cast<uint64_t>(pixels) * percentOfScreen) / 100u);
+  if (changeBudgetPixels_ == 0) changeBudgetPixels_ = 1;
+}
+
+uint16_t GfxRenderer::changeAccumulatedPercent() const {
+  const uint32_t pixels = static_cast<uint32_t>(panelWidth) * panelHeight;
+  if (pixels == 0) return 0;
+  return static_cast<uint16_t>((static_cast<uint64_t>(changeAccumPixels_) * 100u) / pixels);
+}
+
+uint32_t GfxRenderer::diffAndSnapshotFrame() const {
+  // One fused pass: XOR against the snapshot, count the flipped bits, and
+  // overwrite the snapshot word -- but only for words that actually differ.
+  // Text pages leave most of the frame untouched, and skipping those stores is
+  // what keeps the PSRAM-side cost down (reads stream, writes do not).
+  const size_t words = frameBufferSize / sizeof(uint32_t);
+  const auto* src = reinterpret_cast<const uint32_t*>(frameBuffer);
+  auto* dst = reinterpret_cast<uint32_t*>(changePrevFrame_);
+  uint32_t changed = 0;
+  for (size_t i = 0; i < words; i++) {
+    const uint32_t w = src[i];
+    const uint32_t p = dst[i];
+    // Compare BEFORE the XOR, and tell GCC equality is the common case:
+    // written the other way round (xor, then test the result) the compiler
+    // hoists the whole popcount above the branch and every word pays for it.
+    // This form costs 5 instructions for an unchanged word against ~26 for a
+    // changed one, and most of a text page does not change between updates.
+    if (__builtin_expect(w == p, 1)) continue;
+    changed += popcount32(w ^ p);
+    dst[i] = w;
+  }
+  for (size_t i = words * sizeof(uint32_t); i < frameBufferSize; i++) {
+    const uint8_t b = frameBuffer[i];
+    const uint8_t d = static_cast<uint8_t>(b ^ changePrevFrame_[i]);
+    if (d == 0) continue;
+    changed += popcount32(d);
+    changePrevFrame_[i] = b;
+  }
+  return changed;
+}
+
+HalDisplay::RefreshMode GfxRenderer::applyChangeBudget(const HalDisplay::RefreshMode refreshMode) const {
+  // A clean waveform re-drives every pixel, so it wipes the residue whatever
+  // asked for it -- the accumulator restarts from the frame about to be pushed.
+  const bool clean = refreshMode != HalDisplay::FAST_REFRESH;
+  lastRefreshWasClean_ = clean;
+  if (changePrevFrame_ == nullptr || changeBudgetPixels_ == 0 || frameBuffer == nullptr) {
+    return refreshMode;
+  }
+
+  if (!changePrevValid_) {
+    // No baseline yet (first update after boot, or after a framebuffer loan
+    // handed the bytes to a chapter build). Seed it and charge nothing: the
+    // frames around those points are already clean or about to be redrawn.
+    memcpy(changePrevFrame_, frameBuffer, frameBufferSize);
+    changePrevValid_ = true;
+    if (clean) changeAccumPixels_ = 0;
+    return refreshMode;
+  }
+
+  // The diff is instrumented rather than estimated: raise LOG_LEVEL to 2 and
+  // the per-update cost shows up next to every refresh in the serial log.
+  const uint32_t t0 = micros();
+  changeAccumPixels_ += diffAndSnapshotFrame();
+  const unsigned long diffUs = micros() - t0;
+  (void)diffUs;
+  LOG_DBG("GFX", "change budget: %u%% of screen accumulated (diff %lu us)", changeAccumulatedPercent(), diffUs);
+
+  if (clean) {
+    changeAccumPixels_ = 0;
+    return refreshMode;
+  }
+  if (changeAccumPixels_ >= changeBudgetPixels_) {
+    changeAccumPixels_ = 0;
+    lastRefreshWasClean_ = true;
+    LOG_DBG("GFX", "change budget spent; promoting this update to a clean refresh");
+    return HalDisplay::HALF_REFRESH;
+  }
+  return refreshMode;
+}
+
 void GfxRenderer::displayBuffer(HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
-  refreshMode = applyPromotedRefresh(refreshMode);
+  refreshMode = applyChangeBudget(applyPromotedRefresh(refreshMode));
   display.displayBuffer(refreshMode, fadingFix);
 }
 
 void GfxRenderer::displayBufferAsync(HalDisplay::RefreshMode refreshMode) const {
-  refreshMode = applyPromotedRefresh(refreshMode);
+  refreshMode = applyChangeBudget(applyPromotedRefresh(refreshMode));
   // The async path has no turn-off-screen hook, which the sunlight fading fix
   // relies on; keep those users on the blocking path.
   if (fadingFix) {
@@ -2201,6 +2342,11 @@ size_t GfxRenderer::getBufferSize() const { return frameBufferSize; }
 // void GfxRenderer::grayscaleRevert() const { display.grayscaleRevert(); }
 
 void GfxRenderer::displayGrayscaleBase(HalDisplay::RefreshMode fallback) const {
+  // The B/W base of a grayscale page is a full-frame push like any other, so it
+  // feeds (and can be promoted by) the change budget. A promoted Half here is
+  // what the UC8279 driver turns into a true GC on an AA page -- the only thing
+  // that clears gray edge charge; a Half scrub cannot.
+  fallback = applyChangeBudget(fallback);
   display.displayGrayscaleBase(fallback, fadingFix);
 }
 

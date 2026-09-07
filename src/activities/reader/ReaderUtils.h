@@ -168,6 +168,19 @@ inline bool isTouchMenuGesture(const GfxRenderer& renderer, const MappedInputMan
 // Async callers must not touch the framebuffer until
 // renderer.waitRefreshComplete() and must rebuild the differential baseline
 // before the next page turn (the tiled grayscale cleanup does).
+// The page cadence is the CEILING, not the only trigger: the renderer's change
+// budget can promote an update to a clean waveform sooner when a lot of the
+// screen has moved (menus, popups, image-heavy pages). When it does, restart
+// the page count instead of decrementing it -- the panel was just scrubbed, and
+// scheduling a second scrub a page or two later is pure flash for no gain.
+inline void noteRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh) {
+  if (pagesUntilFullRefresh <= 1 || renderer.lastRefreshWasClean()) {
+    pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
+  } else {
+    pagesUntilFullRefresh--;
+  }
+}
+
 inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false) {
   const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
   if (async) {
@@ -175,11 +188,7 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
   } else {
     renderer.displayBuffer(mode);
   }
-  if (pagesUntilFullRefresh <= 1) {
-    pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
-  } else {
-    pagesUntilFullRefresh--;
-  }
+  noteRefreshCycle(renderer, pagesUntilFullRefresh);
 }
 
 // Display the B/W base of a page whose grayscale pass follows. Panels that
@@ -194,11 +203,7 @@ inline void displayBaseWithRefreshCycle(const GfxRenderer& renderer, int& pagesU
   }
   const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
   renderer.displayGrayscaleBase(mode);
-  if (pagesUntilFullRefresh <= 1) {
-    pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
-  } else {
-    pagesUntilFullRefresh--;
-  }
+  noteRefreshCycle(renderer, pagesUntilFullRefresh);
 }
 
 // Grayscale anti-aliasing pass. Renders content twice (LSB + MSB) to build

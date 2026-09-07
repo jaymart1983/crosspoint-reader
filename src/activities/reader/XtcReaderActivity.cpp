@@ -215,7 +215,9 @@ void XtcReaderActivity::renderPage() {
       pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
     } else {
       renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
-      pagesUntilFullRefresh--;
+      // The change budget may have promoted that base to a clean waveform; if
+      // it did, the cadence restarts rather than scheduling a second scrub.
+      ReaderUtils::noteRefreshCycle(renderer, pagesUntilFullRefresh);
     }
 
     renderer.clearScreen(0x00);

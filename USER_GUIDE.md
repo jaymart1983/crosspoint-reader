@@ -312,6 +312,7 @@ The Settings screen allows you to configure the device's behavior. There are a f
   - "Always" - Always hide battery percentage
 
 - **Refresh Frequency**: Set how often the screen does a full refresh while reading to reduce ghosting; options are every 1, 5, 10, 15, or 30 pages.
+- **Ghost Cleanup**: Watches how much of the screen actually changes and cleans the panel once enough has moved, so menus, popups and toolbars stop leaving shadows -- Refresh Frequency only counts reader page turns. *Light* waits for three screens' worth of change, *Normal* (default) for one and a half, *Aggressive* for three quarters; *Off* leaves the page count as the only trigger. Whichever fires first wins.
 
 - **UI Theme**: Set which UI theme to use:
   
