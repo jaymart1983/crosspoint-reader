@@ -78,7 +78,9 @@ class BleTransferActivity final : public Activity, public BleStoreController::Ho
   void enqueueControlWrite(const std::string& value);
   void enqueueDataWrite(const std::string& value);
   // Called from the NimBLE host task on connect and on every MTU exchange. Zero
-  // means "nothing negotiated", which is read back as the 23-byte BLE default.
+  // means "nothing negotiated". This is only a fallback: notifyCapBytes() asks
+  // the live connection what the MTU actually is and uses this when there is no
+  // connection to ask.
   void noteBleMtu(uint16_t mtu);
   // The most a notification may carry right now: ATT_MTU-3, never more than
   // BLE_STATUS_NOTIFY_MAX_BYTES. Public because the runtime sizes frames by it.
@@ -199,7 +201,9 @@ class BleTransferActivity final : public Activity, public BleStoreController::Ho
   // STATUS_DETAIL_MAX in the .cpp for what each level keeps.
   std::string buildStatusJson(StatusScope scope, unsigned detail) const;
   // The largest NOTIFY document that fits `capBytes`, shrinking a level at a
-  // time. Never returns truncated JSON -- the floor is `{}`.
+  // time. Never returns truncated JSON. Returns an empty string when not even
+  // `{"state":"..."}` fits, meaning "send no notification at all" -- an empty
+  // object parses as a status and reports as an unreadable one.
   std::string buildNotifyJson(size_t capBytes) const;
   bool setPendingTrustedHost(const std::string& hostId, const std::string& hostName, const std::string& secret);
   void completeFinalState(State finalState);

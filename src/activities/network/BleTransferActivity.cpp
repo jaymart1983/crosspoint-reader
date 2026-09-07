@@ -10,6 +10,7 @@
 #include <esp_mac.h>
 #include <esp_ota_ops.h>
 #include <esp_random.h>
+#include <freertos/task.h>
 #include <mbedtls/md.h>
 
 #include <algorithm>
@@ -114,6 +115,18 @@ constexpr int BLE_TRANSFER_QR_SIZE = 172;
 // BLE minimum -- 20 bytes of payload.
 constexpr uint16_t BLE_ATT_MTU_MINIMUM = 23;
 constexpr size_t BLE_ATT_NOTIFY_OVERHEAD = 3;
+// What this peripheral answers an MTU exchange with. The Android client asks
+// for 517, but the answer is ours to give and NimBLE refuses outright any value
+// above the BLE_ATT_MTU_MAX its buffers were compiled for -- and a refused
+// setMTU() leaves the previous value in place without saying so. So the
+// preference is a ladder, tried richest first, and what actually took is read
+// back and logged. 185 is the floor because it is what iOS settles on; below
+// that there is nothing to gain over the default.
+constexpr uint16_t BLE_ATT_MTU_PREFERENCES[] = {517, 256, 185};
+// How long teardown will wait for the NimBLE host task, in 5 ms steps. Half a
+// second is far longer than a clean stop needs and still bounded.
+constexpr int BLE_TEARDOWN_WAIT_STEPS = 100;
+constexpr unsigned long BLE_TEARDOWN_WAIT_STEP_MS = 5;
 // Even when the peer grants 517 the status notification stays inside this. It is
 // ATT_MTU-3 for the ~185-byte MTU that iOS and most Android stacks settle on, so
 // the doorbell survives a re-negotiation downwards, a stack that reports the MTU
@@ -130,6 +143,12 @@ constexpr size_t BLE_STATUS_NOTIFY_MAX_BYTES = 180;
 //   2  - the pending block shrinks to the `req`/`op` an answer must quote back
 //   1  - the transfer counters and the error text
 //   0  - the pending block
+// Below level 0 there is no document at all. An empty object used to be the
+// floor, and it is the one thing worse than sending nothing: it parses, so the
+// client accepts it as a status, finds no `state` in it, and reports the
+// session unreadable. A notification is a doorbell for a read that always has
+// the whole truth, so when even {"state":"..."} will not fit the link, the
+// doorbell is skipped and the read stands.
 // The two things a live session cannot lose sit at the bottom of the order on
 // purpose. `received` IS the credit ack an upload waits on (see onDataWrite), so
 // a notification that drops it stalls the transfer. The `pending` geometry is
@@ -137,10 +156,8 @@ constexpr size_t BLE_STATUS_NOTIFY_MAX_BYTES = 180;
 // 180 bytes every real store request still fits there, and only a book arriving
 // while a fetch is outstanding pushes as far as level 2.
 constexpr unsigned STATUS_DETAIL_MAX = 5;
-// The floor of the ladder must itself be sendable on the worst link there is,
-// or "never truncate" is a promise the code cannot keep.
-static_assert(sizeof("{}") - 1 <= BLE_ATT_MTU_MINIMUM - BLE_ATT_NOTIFY_OVERHEAD,
-              "the empty-object fallback must fit a 23-byte ATT MTU");
+// The cap must itself be sendable on the best link this server will ever ask
+// for, or "never truncate" is a promise the code cannot keep.
 static_assert(BLE_STATUS_NOTIFY_MAX_BYTES <= 517 - BLE_ATT_NOTIFY_OVERHEAD,
               "the notify cap must fit the largest MTU this server asks for");
 
@@ -522,6 +539,8 @@ struct BleTransferRuntime {
   BleTransferActivity& activity;
   NimBLEServer* server = nullptr;
   NimBLEService* service = nullptr;
+  NimBLECharacteristic* control = nullptr;
+  NimBLECharacteristic* dataIn = nullptr;
   NimBLECharacteristic* status = nullptr;
   NimBLECharacteristic* dataOut = nullptr;
   ServerCallbacks serverCallbacks;
@@ -530,7 +549,15 @@ struct BleTransferRuntime {
 
   bool begin() {
     NimBLEDevice::init(BLE_DEVICE_NAME);
-    NimBLEDevice::setMTU(517);
+    // Before the server starts, and before any peer can connect: the preferred
+    // MTU is what an exchange is answered with, and NimBLE latches it into a
+    // connection when the connection is made. Setting it after a peer is on the
+    // link changes nothing for that peer.
+    for (const uint16_t wanted : BLE_ATT_MTU_PREFERENCES) {
+      if (NimBLEDevice::setMTU(wanted)) break;
+      LOG_DBG("BLE", "preferred ATT MTU %u refused by the stack", static_cast<unsigned>(wanted));
+    }
+    LOG_INF("BLE", "preferred ATT MTU is %u", static_cast<unsigned>(NimBLEDevice::getMTU()));
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
     server = NimBLEDevice::createServer();
@@ -540,8 +567,8 @@ struct BleTransferRuntime {
     service = server->createService(BLE_SERVICE_UUID);
     if (!service) return false;
 
-    auto* control = service->createCharacteristic(BLE_CONTROL_UUID, NIMBLE_PROPERTY::WRITE);
-    auto* dataIn = service->createCharacteristic(BLE_DATA_IN_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    control = service->createCharacteristic(BLE_CONTROL_UUID, NIMBLE_PROPERTY::WRITE);
+    dataIn = service->createCharacteristic(BLE_DATA_IN_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     status = service->createCharacteristic(BLE_STATUS_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     dataOut = service->createCharacteristic(BLE_DATA_OUT_UUID, NIMBLE_PROPERTY::NOTIFY);
     if (!control || !dataIn || !status || !dataOut) return false;
@@ -560,16 +587,57 @@ struct BleTransferRuntime {
     return true;
   }
 
+  // The ATT MTU actually in force on the live link. onMTUChange() is a *report*
+  // that an exchange happened, not the source of truth, and treating it as the
+  // truth is what pinned this server at 20 usable bytes: a peer that exchanges
+  // before the server callbacks are attached, a stack that raises no event, or a
+  // cached value cleared on disconnect all leave it reading as the 23-byte floor
+  // while the connection is carrying hundreds. ble_att_mtu(), behind
+  // getPeerMTU(), is the number the ATT layer will use for the next PDU, so ask
+  // that and keep the callback only as a fallback for the moment between connect
+  // and the first exchange.
+  uint16_t peerMtu() const {
+    if (!server) return 0;
+    uint16_t best = 0;
+    for (const uint16_t handle : server->getPeerDevices()) {
+      const uint16_t mtu = server->getPeerMTU(handle);
+      if (mtu > best) best = mtu;
+    }
+    return best;
+  }
+
+  bool hasPeer() const { return server != nullptr && server->getConnectedCount() > 0; }
+
   void publish(const std::string& readJson, const std::string& notifyJson) {
     if (!status) return;
-    const size_t notifyCap = activity.notifyCapBytes();
-    const uint16_t mtu = activity.negotiatedMtu_.load(std::memory_order_relaxed);
     // Two different payloads on one characteristic. setValue() is what a GATT
     // read returns; notify(buffer, length) sends *that* buffer instead of the
     // stored value, so the doorbell can be small while the read stays whole.
     // Confirmed present in the pinned NimBLE-Arduino:
     //   bool notify(const uint8_t* value, size_t length, uint16_t connHandle) const
+    //
+    // The stored value is refreshed whether or not anyone is listening: it costs
+    // nothing and it means the next client to read gets the truth immediately
+    // rather than waiting for the next thing to happen.
     status->setValue(readJson);
+
+    const size_t notifyCap = activity.notifyCapBytes();
+    const uint16_t mtu = peerMtu();
+    if (!hasPeer()) {
+      // A doorbell with nobody at the door. NimBLE would drop it anyway; logging
+      // it as a publish made it look as though the app had been told something.
+      LOG_DBG("BLE", "status: read %u bytes, no peer -- notify skipped", static_cast<unsigned>(readJson.size()));
+      return;
+    }
+    if (notifyJson.empty()) {
+      // buildNotifyJson() could not fit even {"state":"..."} in the cap. See the
+      // shrink ladder: an empty object is a well-formed lie and a skipped
+      // notification is not, and the whole document is one GATT read away.
+      LOG_DBG("BLE", "status: read %u bytes, cap %u (mtu %u) -- too small to notify",
+              static_cast<unsigned>(readJson.size()), static_cast<unsigned>(notifyCap),
+              static_cast<unsigned>(mtu));
+      return;
+    }
     LOG_DBG("BLE", "status: notify %u bytes, read %u bytes, cap %u (mtu %u)",
             static_cast<unsigned>(notifyJson.size()), static_cast<unsigned>(readJson.size()),
             static_cast<unsigned>(notifyCap), static_cast<unsigned>(mtu));
@@ -595,13 +663,68 @@ struct BleTransferRuntime {
     if (advertising) advertising->start();
   }
 
+  // Teardown runs on the activity's task while the NimBLE host task is still
+  // live on the other core, so the order below is the whole point of it.
+  //
+  // THE CRASH THIS FIXES. NimBLEDevice::deinit() is nimble_port_stop() followed
+  // immediately by nimble_port_deinit(). nimble_port_stop() returns as soon as
+  // its stop event has been *dispatched* by the host task -- not when that task
+  // has left nimble_port_run(). nimble_port_deinit() then frees the default
+  // event queue (vQueueDelete on g_eventq_dflt) and deinits the controller,
+  // while the host task may still be going round its loop reading that queue.
+  // Every event still in flight when deinit() is called widens that window,
+  // and an advertising restart or a live connection is exactly such an event.
+  // So: stop making work, wait for the host to go quiet, and only then deinit.
   void end() {
+    if (server) {
+      // Nothing may re-enter this runtime or the activity from the host task
+      // once end() returns: the callback objects are members of this struct and
+      // the activity's event mutex is deleted moments later. Detaching first is
+      // what makes that safe rather than merely likely -- NimBLE swaps in its own
+      // do-nothing defaults when handed nullptr.
+      server->setCallbacks(nullptr, false);
+      // Otherwise the disconnect below immediately re-arms the advertiser, which
+      // is one more thing the host task has to unwind while deinit() runs.
+      server->advertiseOnDisconnect(false);
+      for (const uint16_t handle : server->getPeerDevices()) server->disconnect(handle);
+    }
+    for (NimBLECharacteristic* characteristic : {control, dataIn, status, dataOut}) {
+      if (characteristic) characteristic->setCallbacks(nullptr);
+    }
     NimBLEDevice::stopAdvertising();
+    waitForHostQuiet();
     NimBLEDevice::deinit(true);
+    waitForHostTaskGone();
     server = nullptr;
     service = nullptr;
+    control = nullptr;
+    dataIn = nullptr;
     status = nullptr;
     dataOut = nullptr;
+  }
+
+  // Wait for the advertiser to be down and the last peer gone, so the host task
+  // has nothing left queued when deinit() pulls the queue out from under it.
+  void waitForHostQuiet() const {
+    NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+    for (int step = 0; step < BLE_TEARDOWN_WAIT_STEPS; step++) {
+      const bool stillAdvertising = advertising != nullptr && advertising->isAdvertising();
+      if (!stillAdvertising && !hasPeer()) return;
+      resetTaskWatchdogIfSubscribed();
+      delay(BLE_TEARDOWN_WAIT_STEP_MS);
+    }
+    LOG_DBG("BLE", "host still busy at teardown; deinitialising anyway");
+  }
+
+  // And wait for the task itself to be gone before this runtime -- and with it
+  // the callback objects and the activity that owns them -- is freed.
+  static void waitForHostTaskGone() {
+    for (int step = 0; step < BLE_TEARDOWN_WAIT_STEPS; step++) {
+      if (xTaskGetHandle("nimble_host") == nullptr) return;
+      resetTaskWatchdogIfSubscribed();
+      delay(BLE_TEARDOWN_WAIT_STEP_MS);
+    }
+    LOG_DBG("BLE", "nimble host task outlived deinit");
   }
 };
 
@@ -649,7 +772,16 @@ void BleTransferActivity::onEnter() {
 
 void BleTransferActivity::onExit() {
   Activity::onExit();
+  // Close the files first, then take the radio down, and only then clear the
+  // card. The order matters: clearing the Store's thumbnails and the staged
+  // scratch documents is a second or so of SD work, and it used to happen with
+  // the server still advertising and its callbacks still pointing at an activity
+  // that was on its way out. Nothing may arrive over the air after this point.
   resetTransfer(true);
+  if (ble_) {
+    ble_->end();
+    ble_.reset();
+  }
   // The staged library listing, the uploaded progress batch and its result
   // document are scratch files for one session only.
   if (store_) store_->end();
@@ -658,10 +790,6 @@ void BleTransferActivity::onExit() {
   if (Storage.exists(LIBRARY_INDEX_PATH)) Storage.remove(LIBRARY_INDEX_PATH);
   if (Storage.exists(PROGRESS_BATCH_PATH)) Storage.remove(PROGRESS_BATCH_PATH);
   if (Storage.exists(PROGRESS_RESULT_PATH)) Storage.remove(PROGRESS_RESULT_PATH);
-  if (ble_) {
-    ble_->end();
-    ble_.reset();
-  }
   mbedtls_sha256_free(&shaContext_);
 }
 
@@ -1788,9 +1916,14 @@ void BleTransferActivity::storeOpenBook(const std::string& path) { activityManag
 void BleTransferActivity::noteBleMtu(const uint16_t mtu) { negotiatedMtu_.store(mtu, std::memory_order_relaxed); }
 
 size_t BleTransferActivity::notifyCapBytes() const {
-  uint16_t mtu = negotiatedMtu_.load(std::memory_order_relaxed);
-  // 0 means no exchange has happened (or the peer has gone). Assume the floor
-  // rather than the 517 this server asked for: an optimistic guess here is
+  // The live link is authoritative; the value onMTUChange() cached is the
+  // fallback for the moment between connect and the first exchange; the 23-byte
+  // BLE floor is the last resort. Reading the cache first is what used to cap
+  // every notification at 20 bytes on a link that had negotiated far more.
+  uint16_t mtu = ble_ ? ble_->peerMtu() : 0;
+  if (mtu == 0) mtu = negotiatedMtu_.load(std::memory_order_relaxed);
+  // Still 0 means no exchange has happened (or the peer has gone). Assume the
+  // floor rather than the 517 this server asked for: an optimistic guess here is
   // exactly how a document ends up truncated on the wire.
   if (mtu < BLE_ATT_MTU_MINIMUM) mtu = BLE_ATT_MTU_MINIMUM;
   const size_t cap = static_cast<size_t>(mtu) - BLE_ATT_NOTIFY_OVERHEAD;
@@ -1804,9 +1937,12 @@ std::string BleTransferActivity::buildNotifyJson(const size_t capBytes) const {
     if (detail == 0) break;
   }
   // Not even `{"state":"..."}` fits -- a 23-byte MTU with a long state name.
-  // An empty object is still a valid document and still rings the doorbell;
-  // truncating one would hand the client a parse error instead.
-  return "{}";
+  // Returning `{}` here was worse than returning nothing: it is a valid document
+  // that says nothing, so the client parsed it, found no `state`, and reported
+  // the reader unreadable. An empty string means "do not ring the doorbell"; the
+  // GATT read still carries the whole session, and truncating is still never an
+  // option. See publish().
+  return {};
 }
 
 void BleTransferActivity::publishStatus() {
