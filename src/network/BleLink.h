@@ -288,6 +288,9 @@ class BleLink {
   // time. Never returns truncated JSON. Returns an empty string when not even
   // `{"state":"..."}` fits, meaning "send no notification at all" -- an empty
   // object parses as a status and reports as an unreadable one.
+  // The READ value, shed until it fits the 512-byte ATT attribute ceiling.
+  // Never returns a document that would be served truncated.
+  std::string buildReadJson() const;
   std::string buildNotifyJson(size_t capBytes) const;
 };
 

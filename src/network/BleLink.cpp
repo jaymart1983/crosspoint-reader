@@ -149,6 +149,13 @@ constexpr unsigned long BLE_TEARDOWN_WAIT_STEP_MS = 5;
 // exchanges at all. The whole document is on the READ; there is nothing to gain
 // by filling 514 bytes of notification with it.
 constexpr size_t BLE_STATUS_NOTIFY_MAX_BYTES = 180;
+// The ATT ceiling on a single attribute value (Bluetooth Core, Vol 3 Part F).
+// A characteristic value longer than this cannot be stored or served whole, so a
+// READ document that exceeds it comes back truncated -- which is invalid JSON,
+// and which the app reports as "reader returned an unreadable status". The
+// notify path has always been bounded; the read path was not, and had been over
+// this line at 533 bytes before `settings` was added to the capability lists.
+constexpr size_t BLE_ATT_ATTR_MAX_BYTES = 512;
 // Shrink levels for a NOTIFY document, richest first. Each level drops the next
 // least useful group of fields; level 0 is `{"state":"..."}` alone, and the
 // floor below that is the empty object. Nothing is ever cut mid-string.
@@ -583,7 +590,7 @@ struct BleLinkRuntime {
     // The stored value is the authoritative document from the first moment: a
     // client that reads before it ever sees a notification still gets the whole
     // truth.
-    status->setValue(link.buildStatusJson(BleLink::StatusScope::READ, STATUS_DETAIL_MAX));
+    status->setValue(link.buildReadJson());
 
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(BLE_SERVICE_UUID);
@@ -1993,6 +2000,28 @@ size_t BleLink::notifyCapBytes() const {
   return cap < BLE_STATUS_NOTIFY_MAX_BYTES ? cap : BLE_STATUS_NOTIFY_MAX_BYTES;
 }
 
+std::string BleLink::buildReadJson() const {
+  // Bounded for the same reason the notification is: a value over the ATT
+  // ceiling is served truncated, and truncated JSON is indistinguishable to the
+  // client from a broken reader. Sheds decoration, then capability lists, then
+  // the clock -- all re-derivable -- and never touches identity, the nonce, or
+  // auth_error.
+  for (unsigned detail = STATUS_DETAIL_MAX;; --detail) {
+    std::string json = buildStatusJson(StatusScope::READ, detail);
+    if (json.size() <= BLE_ATT_ATTR_MAX_BYTES || detail == 0) {
+      if (json.size() > BLE_ATT_ATTR_MAX_BYTES) {
+        // Nothing sheddable is left and it still does not fit. Log it loudly
+        // rather than hand the stack a value it will silently cut in half.
+        LOG_ERR("BLE", "status read is %u bytes, over the %u-byte ATT ceiling",
+                static_cast<unsigned>(json.size()), static_cast<unsigned>(BLE_ATT_ATTR_MAX_BYTES));
+      } else if (detail < STATUS_DETAIL_MAX) {
+        LOG_DBG("BLE", "status read shed to detail %u (%u bytes)", detail, static_cast<unsigned>(json.size()));
+      }
+      return json;
+    }
+  }
+}
+
 std::string BleLink::buildNotifyJson(const size_t capBytes) const {
   for (unsigned detail = STATUS_DETAIL_MAX;; --detail) {
     std::string json = buildStatusJson(StatusScope::NOTIFY, detail);
@@ -2011,7 +2040,7 @@ std::string BleLink::buildNotifyJson(const size_t capBytes) const {
 void BleLink::publishStatus() {
   statusDirty_ = false;
   if (!ble_) return;
-  ble_->publish(buildStatusJson(StatusScope::READ, STATUS_DETAIL_MAX), buildNotifyJson(notifyCapBytes()));
+  ble_->publish(buildReadJson(), buildNotifyJson(notifyCapBytes()));
 }
 
 std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned detail) const {
@@ -2023,6 +2052,15 @@ std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned det
   // still one GATT read away, and the client already has to read to get the
   // capability lists it saw at connect time.
   const bool full = (scope == StatusScope::READ);
+  // READ now sheds too. It used to ignore `detail` entirely and emit everything,
+  // which is how it grew past the 512-byte ATT ceiling and started coming back
+  // truncated. What it sheds is only ever re-derivable: the trims below drop
+  // decoration and capability lists, never identity, never the nonce, and never
+  // the reason a hello was refused -- those are what a client cannot recover
+  // without them, and the pairing path needs all three.
+  const bool wantDecoration = !full || detail >= 5;  // firmware_name, ota/resume flags
+  const bool wantKinds = !full || detail >= 4;       // upload_kinds / download_kinds
+  const bool wantClock = !full || detail >= 3;       // clock_supported, device_time
   const bool wantSession = full || detail >= 5;   // session-constant capability facts
   const bool wantIdentity = full || detail >= 4;  // who this device is, and to whom
   const bool wantProgress = full || detail >= 2;  // byte counters and the error text
@@ -2034,12 +2072,15 @@ std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned det
   doc["state"] = state.c_str();
   if (wantSession) doc["protocol_version"] = 1;
   if (full) {
-    doc["firmware_name"] = "CrossPoint Reader";
-    // Read-only by design. A Web Bluetooth companion URL is a session constant
-    // that no notification has any business carrying.
-    doc["browser_companion_url"] = BLE_TRANSFER_WEB_URL;
-    doc["firmware_ota_supported"] = true;
-    doc["resume_supported"] = true;
+    // browser_companion_url is gone. The Web Bluetooth companion is no longer
+    // offered anywhere in the UI, and at 49 bytes it was the single largest
+    // avoidable field in a document that has to fit 512.
+    if (wantDecoration) {
+      doc["firmware_name"] = "CrossPoint Reader";
+      doc["firmware_ota_supported"] = true;
+      doc["resume_supported"] = true;
+    }
+    if (wantKinds) {
     JsonArray uploadKinds = doc["upload_kinds"].to<JsonArray>();
     uploadKinds.add("book");
     uploadKinds.add("bmp");
@@ -2053,11 +2094,12 @@ std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned det
     downloadKinds.add("library");
     downloadKinds.add("progress_result");
     downloadKinds.add("settings");
+    }
   }
   // The store is a capability of this firmware, not of this screen: an app can
   // see it is supported while the user is still on the transfer screen.
   if (wantSession) doc["store_supported"] = true;
-  if (wantSession) {
+  if (wantSession && wantClock) {
     doc["clock_supported"] = halClock.isAvailable();
     // Omitted, never zeroed, when the device does not know the time: the client
     // uses its absence to decide it must send `set_time`, and its value to notice
