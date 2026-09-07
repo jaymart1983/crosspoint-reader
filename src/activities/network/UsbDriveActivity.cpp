@@ -6,6 +6,9 @@
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
+#if FREEINK_CAP_BLE_TRANSFER
+#include "network/BleLink.h"
+#endif
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -15,10 +18,35 @@ void UsbDriveActivity::onEnter() {
   resetUi();
   app.setScreen(&UsbDriveActivity::driveScreen, this);
 
+  // Stop the radio before the card leaves. HalStorage's contract for
+  // beginUsbDrive() is that all filesystem work has stopped first -- it detaches
+  // the FAT mount for raw block access, and every open HalFile becomes invalid.
+  //
+  // The main loop's exclusive-storage return keeps BleLink::tick() from running,
+  // but that only silences the pump: NimBLE's own host task is still up, still
+  // advertising, and still free to take a connection and run a GATT callback
+  // against storage that is no longer mounted. Before the link outlived its
+  // screen that could not happen, because opening USB Drive meant leaving the
+  // transfer screen. Now the radio is a property of being awake, so it has to be
+  // stopped explicitly -- the same reason an OTA partition write stops it.
+  //
+  // Every exit from this screen reboots, so there is no matching restart here:
+  // begin() runs again in setup().
+#if FREEINK_CAP_BLE_TRANSFER
+  BLE_LINK.end();
+#endif
+
   // Show the safety instructions before giving the raw SD card to the USB host.
   requestUpdateAndWait();
   if (!Storage.beginUsbDrive()) {
     LOG_ERR("USB", "Unable to start USB Drive");
+    // beginUsbDrive() remounts the filesystem on its own failure paths, so the
+    // reason the radio was stopped is gone and this screen is not going to
+    // reboot. Bring it back rather than leaving the device silently unreachable
+    // until the next power cycle.
+#if FREEINK_CAP_BLE_TRANSFER
+    BLE_LINK.begin();
+#endif
     preparing = false;
     startFailed = true;
     state = State::IoError;

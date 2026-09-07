@@ -20,6 +20,9 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "components/icons/bookmark.h"
+#if FREEINK_CAP_BLE_TRANSFER
+#include "network/BleLink.h"
+#endif
 #include "fontIds.h"
 
 // Internal constants
@@ -95,6 +98,40 @@ void BaseTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t
 
   if (charging) {
     drawBatteryLightningBolt(renderer, rect.x + 4, rect.y + 2);
+  }
+}
+
+void BaseTheme::drawBluetoothGlyph(const GfxRenderer& renderer, const int x, const int y, const int w,
+                                   const int h, const BleIndicator state) {
+  if (state == BleIndicator::Off && h < 6) return;  // no room to say anything useful
+
+  // Linked draws white-on-black. Filling first and inverting the strokes is the
+  // one difference an e-ink panel cannot lose at this size -- a 9px glyph has no
+  // room for a badge, and a dotted variant would dither into the rune itself.
+  const bool linked = state == BleIndicator::Linked;
+  if (linked) {
+    renderer.fillRect(x - 2, y - 1, w + 4, h + 2, true);
+  }
+  const bool ink = !linked;  // stroke colour: black normally, white when inverted
+
+  // The rune: a stem, two triangles to the right of it, and the two diagonals
+  // that cross it. r is the half-width the triangles reach out to.
+  const int cx = x + w / 2;
+  const int r = w / 2;
+  const int qh = h / 4;
+  renderer.drawLine(cx, y, cx, y + h, ink);                    // stem
+  renderer.drawLine(cx, y, cx + r, y + qh, ink);               // top vertex out
+  renderer.drawLine(cx + r, y + qh, cx - r, y + 3 * qh, ink);  // upper diagonal
+  renderer.drawLine(cx, y + h, cx + r, y + 3 * qh, ink);       // bottom vertex out
+  renderer.drawLine(cx + r, y + 3 * qh, cx - r, y + qh, ink);  // lower diagonal
+
+  if (state == BleIndicator::PeerUnverified) {
+    // Attached but not through the hello gate. An underscore rather than a
+    // different rune: the radio is doing its job, the pairing is not done.
+    renderer.drawLine(x, y + h + 2, x + w, y + h + 2, true);
+  } else if (state == BleIndicator::Off) {
+    // Struck through, the way every radio-off indicator is.
+    renderer.drawLine(x - 1, y + h, x + w + 1, y, true);
   }
 }
 
@@ -395,6 +432,33 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
         ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, percentText, tokens.smallText).width);
   }
 
+  // --- status cluster: clock + Bluetooth, to the left of the battery ---------
+  // Both answer a question the user cannot otherwise ask the device: "is the
+  // radio actually up, and is the phone actually on it?" -- and, for the clock,
+  // whether the RTC has ever been told the time at all. Sized here so it can be
+  // added to the same reserve the battery uses; the header component then keeps
+  // the title clear of all of it.
+  char clockText[16];
+  const bool showClock =
+      halClock.isAvailable() && halClock.formatTime(clockText, sizeof(clockText), SETTINGS.clockUtcOffsetQ,
+                                                    SETTINGS.clockFormat == 1);
+  BleIndicator bleState = BleIndicator::Off;
+#if FREEINK_CAP_BLE_TRANSFER
+  if (BLE_LINK.isRunning()) {
+    bleState = BLE_LINK.isAuthenticated()  ? BleIndicator::Linked
+               : BLE_LINK.isPeerConnected() ? BleIndicator::PeerUnverified
+                                            : BleIndicator::Advertising;
+  }
+  const bool showBle = true;
+#else
+  const bool showBle = false;
+#endif
+  const int16_t clockWidth =
+      showClock ? ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, clockText, tokens.smallText).width : 0;
+  int16_t clusterWidth = 0;
+  if (showClock) clusterWidth = static_cast<int16_t>(clusterWidth + clockWidth + tokens.spaceMd);
+  if (showBle) clusterWidth = static_cast<int16_t>(clusterWidth + bluetoothGlyphWidth + tokens.spaceMd);
+
   fui::HeaderProps props;
   props.title = title;
   props.rightLabel = subtitle;  // firmware headers right-align the secondary text
@@ -426,7 +490,7 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
     const int titleTop = static_cast<int>(band.height) - tokens.headerUnderline - tokens.spaceMd - titleLineHeight;
     props.titleOffsetY = static_cast<int16_t>(titleTop - (static_cast<int>(band.height) - titleLineHeight) / 2);
   } else {
-    const int16_t reserve = static_cast<int16_t>(batteryReserve + tokens.spaceMd);
+    const int16_t reserve = static_cast<int16_t>(batteryReserve + clusterWidth + tokens.spaceMd);
     if (batteryLeft) {
       props.leftReserve = reserve;
     } else {
@@ -459,6 +523,26 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
                                        : static_cast<int16_t>(band.right() - batteryEdgeInset - batteryReserve);
   const int16_t batteryH = static_cast<int16_t>(metrics.batteryBarHeight);
   fui::batteryIndicator(ui.frame, fui::Rect{batteryX, band.y, batteryReserve, batteryH}, battery);
+
+  // Laid out leftward from the battery so the cluster keeps its shape whichever
+  // side the theme puts the battery on, and whether or not the percent label is
+  // showing (which changes batteryReserve).
+  {
+    int cursorX = batteryLeft ? static_cast<int>(batteryX + batteryReserve + tokens.spaceMd)
+                              : static_cast<int>(batteryX - tokens.spaceMd);
+    const int glyphH = std::max(8, static_cast<int>(batteryH) - 4);
+    const int glyphY = static_cast<int>(band.y) + (static_cast<int>(batteryH) - glyphH) / 2;
+    if (showBle) {
+      const int glyphX = batteryLeft ? cursorX : cursorX - bluetoothGlyphWidth;
+      drawBluetoothGlyph(renderer, glyphX, glyphY, bluetoothGlyphWidth, glyphH, bleState);
+      cursorX += batteryLeft ? bluetoothGlyphWidth + tokens.spaceMd : -(bluetoothGlyphWidth + tokens.spaceMd);
+    }
+    if (showClock) {
+      const int16_t textH = ui.target.lineHeight(fui::GfxRendererTarget::FONT_SMALL);
+      const int16_t textX = static_cast<int16_t>(batteryLeft ? cursorX : cursorX - clockWidth);
+      ui.target.text(fui::Rect{textX, band.y, clockWidth, textH}, clockText, tokens.smallText);
+    }
+  }
 
   if (manualRightLabel) {
     const fui::Size labelSize = ui.target.measureText(fui::GfxRendererTarget::FONT_SMALL, subtitle, tokens.smallText);

@@ -13,10 +13,8 @@
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "util/QrUtils.h"
 
 namespace {
-constexpr int PAIRING_QR_SIZE = 160;
 }  // namespace
 
 void BlePairingActivity::onEnter() {
@@ -119,21 +117,15 @@ void BlePairingActivity::render(RenderLock&&) {
     y += smallHeight + metrics.verticalSpacing;
   }
 
-  // --- the companion, and the room left for it ------------------------------
-  // Everything below the QR is reserved before the QR is sized, so the QR is
-  // what shrinks on a short panel or a tall theme -- never the code, and never
-  // the Forget button.
+  // No QR and no companion URL. The web companion was how a browser paired with
+  // the reader; this device pairs with the phone app, and putting a second,
+  // unrelated way to connect on the one screen that teaches pairing is how the
+  // Store ended up sending people to a web page instead of the app they had
+  // open. The six digits above are the whole instruction.
   forgetRect_ = Rect{0, 0, 0, 0};
   const int forgetReserve = paired ? metrics.menuRowHeight + metrics.verticalSpacing : 0;
-  const int reservedBelow = metrics.buttonHintsHeight + metrics.verticalSpacing + smallHeight + forgetReserve;
-  const int available = pageHeight - y - reservedBelow;
-  const int qrSize = std::min({PAIRING_QR_SIZE, pageWidth - metrics.contentSidePadding * 2, available});
-  if (qrSize > 0) {
-    QrUtils::drawQrCode(renderer, Rect{(pageWidth - qrSize) / 2, y, qrSize, qrSize}, BleLink::companionUrl());
-    y += qrSize + metrics.verticalSpacing;
-  }
-  renderer.drawCenteredText(SMALL_FONT_ID, y, BleLink::companionUrl(), true);
-  y += smallHeight + metrics.verticalSpacing;
+  const int reservedBelow = metrics.buttonHintsHeight + metrics.verticalSpacing + forgetReserve;
+  y = std::max(y, pageHeight - reservedBelow);
 
   if (paired) {
     // One tile, drawn with the theme's own button-menu so it matches every other
