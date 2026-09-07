@@ -76,10 +76,35 @@ def get_base_version(project_dir):
     return config.get('crosspoint', 'version')
 
 
+def read_build_stamp():
+    """Version written by the host before syncing to a build box.
+
+    The build runs in a container fed by rsync with .git excluded, so git is
+    blind there and every build came out `dev-unknown-unknown`. The host writes
+    .build_version next to this script; git remains the source of truth when it
+    is actually available.
+    """
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.build_version')
+    try:
+        with open(path) as fh:
+            value = fh.read().strip()
+        return value or None
+    except OSError:
+        return None
+
+
 def inject_version(env):
     # Only applies to development environments; release envs set the
     # version via build_flags in platformio.ini and are unaffected.
-    if env['PIOENV'] not in ('default', 'sticky'):
+    # x4pro is a development target here: a flashed build must say which commit
+    # it is, or you cannot tell two of them apart on the device.
+    if env['PIOENV'] not in ('default', 'sticky', 'x4pro'):
+        return
+
+    stamp = read_build_stamp()
+    if stamp:
+        env.Append(CPPDEFINES=[('CROSSPOINT_VERSION', '\\"%s\\"' % stamp)])
+        print('[git_branch.py] version from .build_version: %s' % stamp)
         return
 
     project_dir = env['PROJECT_DIR']
