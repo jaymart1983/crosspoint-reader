@@ -18,8 +18,12 @@ The value is the HEAD commit time, not `now`:
     commit time only moves when the source does.
   * It is still a lower bound: the commit cannot postdate the build.
 
-Without git (a source tarball, or git missing) it falls back to the actual build
-time, which is likewise UTC and likewise a lower bound. In either case the value
+SOURCE_DATE_EPOCH overrides the git lookup when set, so a tree without a usable
+repo (tarball, stripped CI checkout, `git worktree`, or sources copied to a build
+host) can still be given a stable value instead of falling through to the wall
+clock. Only if neither is available does it fall back to the actual build time,
+which is likewise UTC and likewise a lower bound -- but which does change the
+global -D on every build, and so costs a full recompile each time. In either case the value
 is floored at 2020-01-01 so it can never be a value HalClock would reject.
 """
 
@@ -36,6 +40,32 @@ MAX_VALID_EPOCH = 4102444800  # 2100-01-01T00:00:00Z
 
 def warn(msg):
     print(f'WARNING [build_epoch.py]: {msg}', file=sys.stderr)
+
+
+def source_date_epoch():
+    """SOURCE_DATE_EPOCH, or None if unset/unusable.
+
+    The reproducible-builds standard variable. It exists for exactly the case
+    this script cannot otherwise handle: a build tree with no usable git repo.
+    That covers a source tarball, a CI checkout that strips .git, a `git
+    worktree` whose .git is a pointer to a gitdir outside the tree -- and a
+    build host the sources were copied to without .git, which is how the
+    CrossPoint X4 Pro builds run. In all of those the git lookup below fails
+    and the fallback is the wall clock, which changes this global -D on every
+    build and so invalidates the entire compile cache every time: the very
+    thing the module docstring set out to avoid.
+
+    The caller floors and range-checks the result, so a malformed value is no
+    more dangerous here than a bad commit time.
+    """
+    raw = os.environ.get('SOURCE_DATE_EPOCH')
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        warn(f'SOURCE_DATE_EPOCH is not an integer ({raw!r}); ignoring it')
+        return None
 
 
 def git_commit_epoch(project_dir):
@@ -61,8 +91,11 @@ def git_commit_epoch(project_dir):
 
 
 def resolve_build_epoch(project_dir):
-    epoch = git_commit_epoch(project_dir)
-    source = 'HEAD commit time'
+    epoch = source_date_epoch()
+    source = 'SOURCE_DATE_EPOCH'
+    if epoch is None:
+        epoch = git_commit_epoch(project_dir)
+        source = 'HEAD commit time'
     if epoch is None:
         # time.time() is already UTC-based, so no time-zone conversion is needed.
         epoch = int(time.time())
