@@ -80,11 +80,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // board with no portrait the whole UI follows the reader into landscape
   // rather than flipping the frame back and forth around it.
   //
-  // If an X4 Pro comes up upside down, swap these two entries: that is the only
-  // thing here that depends on how the panel is mounted, which the board
-  // profile still carries as NO_FLIP "pending hardware".
+  // X4 Pro is portrait-only: the GT911 is mounted portrait (reports X:0..480,
+  // Y:0..800) and every non-reader screen is laid out portrait. Landscape was
+  // tried on hardware and rejected. INVERTED is kept so a 180 flip is still
+  // reachable; if it comes up upside down, swap these two entries.
 #if FREEINK_DEVICE_X4PRO
-  static constexpr uint8_t ORIENTATION_CHOICES[] = {LANDSCAPE_CCW, LANDSCAPE_CW};
+  static constexpr uint8_t ORIENTATION_CHOICES[] = {PORTRAIT, INVERTED};
 #else
   static constexpr uint8_t ORIENTATION_CHOICES[] = {PORTRAIT, LANDSCAPE_CW, INVERTED, LANDSCAPE_CCW};
 #endif
