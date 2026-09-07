@@ -109,7 +109,9 @@ void FrontlightPanelActivity::buildTileOrder() {
   const auto add = [this](const TileId id) { tileIds[tileCount++] = id; };
   add(TILE_NIGHT);
   add(TILE_REFRESH);
+#if !FREEINK_DEVICE_X4PRO
   add(TILE_ORIENTATION);
+#endif
   add(TILE_TOUCH);
   add(TILE_SLEEP);
   add(TILE_SETTINGS);
