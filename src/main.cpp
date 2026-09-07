@@ -48,11 +48,15 @@ FontDecompressor fontDecompressor;
 SdCardFontSystem sdFontSystem;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
 static unsigned long allowSleepAt = 0;
-static unsigned long lastX4ProPowerClickAt = 0;
+// A power click that has happened but is not yet dispatched: it only becomes a
+// Select once the double-tap window closes without a second click.
+static unsigned long pendingPowerClickAt = 0;
 
 namespace {
-constexpr unsigned long X4PRO_POWER_DOUBLE_CLICK_MS = 500;
-constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
+// Five-second Home-key hold that switches the touchscreen back on.
+constexpr unsigned long TOUCH_RESCUE_HOLD_MS = 5000;
+unsigned long homeKeyHoldStartedAt = 0;
+bool homeKeyHoldPastSdkThreshold = false;
 }  // namespace
 
 // A wake hold must never become an in-app power-button action.  Boot may continue
@@ -205,8 +209,9 @@ void restartToHomeAfterStorageHandoff() {
   ESP.restart();
 }
 
-// Flip the frontlight and persist the new on/off preference. Shared by the
-// X4 Pro power double-click and the SHORT_PWRBTN::TOGGLE_LIGHT single click.
+#if FREEINK_CAP_TOUCH
+// Flip the frontlight and persist the new on/off preference. Reached from the
+// power-button double tap.
 static void toggleFrontlightAndPersist() {
   const bool lightOn = !Frontlight.isOn();
   Frontlight.setOn(lightOn);
@@ -214,70 +219,121 @@ static void toggleFrontlightAndPersist() {
   SETTINGS.saveToFile();
   LOG_INF("LIGHT", "Frontlight toggled %s by power button", lightOn ? "on" : "off");
 }
+#endif
 
-// Full reboot, splash and all -- deliberately NOT silentRestart(), which is the
-// heap-defrag path that suppresses the boot screen.
-static void rebootDevice() {
-  LOG_INF("MAIN", "Reboot requested");
-  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-  delay(50);
-  ESP.restart();
-}
+// Five-second Home-key hold that switches the touchscreen back on. This is the
+// way back in after the touchscreen has been switched off in
+// Settings -> Controls -> Touchscreen, so it has to work with the glass dead:
+// the Home key is a separate signal on the touch controller and is deliberately
+// never routed through MappedInputManager's touch gate.
+//
+// TIMING CAVEAT, deliberate and unavoidable without an SDK change: InputManager
+// reports only three Home-key events -- the press edge, a tap on release of a
+// SHORT press, and a one-shot long-press once the hold passes its own ~700 ms
+// threshold. A release AFTER that threshold produces no event at all, and there
+// is no "is the key still down" query. So the five seconds are timed from the
+// press edge and merely confirmed still-down at ~700 ms; a release somewhere
+// between 0.7 s and 5 s cannot be observed. Two things keep that honest:
+//   * the tracker is only armed while touch is already off, where the gesture
+//     has exactly one meaning and re-enabling is the fail-safe direction; and
+//   * any other button edge abandons a pending hold, so a user who held Home
+//     briefly and then carried on with the side keys does not get a surprise.
+static bool handleTouchRescueHomeHold() {
+  if (!BoardConfig::hasHomeKey()) return false;
 
-// The capacitive Home key, when remapped to the hardware-utility role: a tap
-// toggles the touchscreen (palm rejection while reading), a hold reboots. The
-// chassis "Reset" pinhole is wired to the ESP32 EN line and never reaches
-// firmware, so this key is where those two actions live. Returns true when the
-// key consumed the frame.
-static bool handleUtilityHomeKey() {
-  if (!BoardConfig::hasHomeKey() ||
-      SETTINGS.homeKeyAction != CrossPointSettings::HOME_KEY_ACTION::HOME_KEY_TOUCH_REBOOT) {
-    return false;
-  }
-  if (gpio.wasHomeKeyLongPressed()) {
-    rebootDevice();
-    return true;
-  }
-  if (gpio.wasHomeKeyTapped()) {
-    const bool enabled = MappedInputManager::toggleTouchInput();
-    LOG_INF("TOUCH", "Touchscreen %s by Home key", enabled ? "enabled" : "disabled");
-    char message[48];
-    snprintf(message, sizeof(message), "%s %s", tr(STR_TOUCH_TOGGLE),
-             I18N.get(enabled ? StrId::STR_STATE_ON : StrId::STR_STATE_OFF));
-    {
-      RenderLock lock;
-      GUI.drawPopup(renderer, message);
-    }
-    delay(600);
-    activityManager.requestUpdate();
-    return true;
-  }
-  return false;
-}
-
-bool handleX4ProFrontlightDoubleClick() {
-  // A single click already toggles the light in this mode, so the double-click
-  // shortcut would just toggle it straight back.
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::TOGGLE_LIGHT) return false;
-  if (!BoardConfig::isX4Pro() || !gpio.wasReleased(HalGPIO::BTN_POWER)) {
+  if (MappedInputManager::isTouchInputEnabled()) {
+    homeKeyHoldStartedAt = 0;  // nothing to rescue
     return false;
   }
 
-  const unsigned long now = millis();
-  if (gpio.getPowerButtonHeldTime() > X4PRO_POWER_CLICK_MAX_HOLD_MS) {
-    lastX4ProPowerClickAt = 0;
+  if (gpio.wasHomeKeyPressed()) {
+    homeKeyHoldStartedAt = millis();
+    homeKeyHoldPastSdkThreshold = false;
+    return false;
+  }
+  if (gpio.wasHomeKeyTapped()) {  // released under the SDK threshold: a tap, not a hold
+    homeKeyHoldStartedAt = 0;
+    return false;
+  }
+  if (gpio.wasHomeKeyLongPressed()) homeKeyHoldPastSdkThreshold = true;
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased()) {
+    homeKeyHoldStartedAt = 0;  // the user moved on to another key
     return false;
   }
 
-  if (lastX4ProPowerClickAt == 0 || now - lastX4ProPowerClickAt > X4PRO_POWER_DOUBLE_CLICK_MS) {
-    lastX4ProPowerClickAt = now;
-    return false;
-  }
+  if (homeKeyHoldStartedAt == 0 || !homeKeyHoldPastSdkThreshold) return false;
+  if (millis() - homeKeyHoldStartedAt < TOUCH_RESCUE_HOLD_MS) return false;
 
-  lastX4ProPowerClickAt = 0;
-  toggleFrontlightAndPersist();
+  homeKeyHoldStartedAt = 0;
+  MappedInputManager::setTouchInputEnabled(true);
+  LOG_INF("TOUCH", "Touchscreen re-enabled by a %lu ms Home-key hold", TOUCH_RESCUE_HOLD_MS);
+  char message[48];
+  snprintf(message, sizeof(message), "%s %s", tr(STR_TOUCH_TOGGLE), I18N.get(StrId::STR_STATE_ON));
+  {
+    RenderLock lock;
+    GUI.drawPopup(renderer, message);
+  }
+  delay(600);
+  activityManager.requestUpdate();
   return true;
 }
+
+#if FREEINK_CAP_TOUCH
+// Power-button gesture decoder for boards with no physical Back or Confirm key
+// (see CrossPointSettings::usesPowerGestures). One button, four gestures:
+//
+//   single tap   -> the configured short-click action, Select by default
+//   double tap   -> frontlight on/off
+//   hold ~1 s    -> Back
+//   hold 5 s     -> Sleep (handled by the shared sleep path below, which reads
+//                   its threshold from getPowerButtonDuration())
+//
+// Two ambiguities have to be resolved on purpose:
+//
+// 1. Tap vs double tap. A single tap CANNOT be dispatched on its own release --
+//    the second tap of a double tap has not happened yet. So the tap is parked
+//    and only dispatched once POWER_DOUBLE_CLICK_MS has passed with no second
+//    click. Every Select therefore costs up to ~300 ms of latency. That is
+//    acceptable here because the panel's own refresh is ~500 ms, so the delay
+//    lands inside the redraw the user is already waiting for; the window is
+//    still kept at the short end of the usual 250-350 ms double-click range so
+//    the cost stays as small as the gesture allows.
+// 2. Back vs Sleep. Back fires on the RELEASE of a hold at or past
+//    POWER_BACK_HOLD_MS, not at the 1 s mark itself, so a press on its way to a
+//    5 s sleep hold never navigates back en route. Sleep fires while the button
+//    is still down and does not return, so only one of the two can ever run for
+//    a given press. A release at or past the sleep threshold (possible only if
+//    sleep was blocked, e.g. during the post-wake grace window) is discarded
+//    rather than downgraded to Back.
+//
+// Returns true when the frame is fully consumed.
+static bool handlePowerGestureRelease() {
+  if (!CrossPointSettings::usesPowerGestures() || !gpio.wasReleased(HalGPIO::BTN_POWER)) return false;
+
+  const unsigned long held = gpio.getPowerButtonHeldTime();
+  const unsigned long now = millis();
+
+  if (held <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS) {
+    if (pendingPowerClickAt != 0 && now - pendingPowerClickAt <= CrossPointSettings::POWER_DOUBLE_CLICK_MS) {
+      pendingPowerClickAt = 0;
+      // Guarded rather than assumed: every board on the gesture scheme today has
+      // a frontlight, but a second tap must not write a frontlight preference on
+      // one that does not.
+      if (Frontlight.present()) toggleFrontlightAndPersist();
+      return true;
+    }
+    pendingPowerClickAt = now;  // park it; the loop below dispatches or drops it
+    return true;
+  }
+
+  pendingPowerClickAt = 0;  // a hold is never half of a double tap
+  if (held >= CrossPointSettings::POWER_BACK_HOLD_MS && held < CrossPointSettings::POWER_SLEEP_HOLD_MS) {
+    mappedInputManager.setPowerBackFrame(true);
+    return false;  // fall through so the active activity sees Back on this frame
+  }
+  return true;  // the inert band between the click ceiling and the Back floor
+}
+#endif
 
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
 
@@ -692,7 +748,7 @@ void loop() {
     return;
   }
 
-  if (handleUtilityHomeKey()) return;
+  if (handleTouchRescueHomeHold()) return;
 
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
@@ -718,20 +774,19 @@ void loop() {
     screenshotComboActive = false;
   }
 
-  // Consume the second X4 Pro power-button release so it does not also run a
-  // configured short-power action after toggling the frontlight.
-  if (handleX4ProFrontlightDoubleClick()) {
-    return;
-  }
-
 #if FREEINK_CAP_TOUCH
-  // A single X4 Pro power click becomes Confirm only after the frontlight
-  // double-click window expires without a second click.
-  mappedInputManager.setPowerConfirmClickFrame(false);
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM && BoardConfig::isX4Pro() &&
-      lastX4ProPowerClickAt != 0 && millis() - lastX4ProPowerClickAt > X4PRO_POWER_DOUBLE_CLICK_MS) {
-    lastX4ProPowerClickAt = 0;
-    mappedInputManager.setPowerConfirmClickFrame(true);
+  // The power-gesture events last exactly one frame: clear them, then let the
+  // decoder republish whichever one this frame resolves.
+  mappedInputManager.setPowerClickFrame(false);
+  mappedInputManager.setPowerBackFrame(false);
+  if (handlePowerGestureRelease()) return;
+  // A parked single tap becomes a real short click once the double-tap window
+  // closes. It is published as the power release the decoder swallowed, so the
+  // configured short-click action -- Select by default -- runs from its normal
+  // place rather than being special-cased here.
+  if (pendingPowerClickAt != 0 && millis() - pendingPowerClickAt > CrossPointSettings::POWER_DOUBLE_CLICK_MS) {
+    pendingPowerClickAt = 0;
+    mappedInputManager.setPowerClickFrame(true);
   }
 #endif
 
@@ -772,14 +827,6 @@ void loop() {
     return;
   }
 #endif
-
-  // Toggle the frontlight on a short power click. The long press above already
-  // sleeps the device, so the two power-button gestures never collide.
-  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::TOGGLE_LIGHT && Frontlight.present() &&
-      mappedInputManager.wasReleased(MappedInputManager::Button::Power)) {
-    toggleFrontlightAndPersist();
-    return;
-  }
 
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&

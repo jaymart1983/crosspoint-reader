@@ -2,7 +2,6 @@
 
 #include <BoardConfig.h>
 #include <HalClock.h>
-#include <HalFrontlight.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <SdCardFontRegistry.h>
@@ -15,6 +14,7 @@
 
 #include "CrossPointSettings.h"
 #include "KOReaderCredentialStore.h"
+#include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
 #include "activities/settings/SettingsActivity.h"
 #include "util/DictionaryRegistry.h"
@@ -180,16 +180,14 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
 }
 
 // Short power-button actions, in enum order (CrossPointSettings::SHORT_PWRBTN).
-// PWR_CONFIRM only makes sense where there is no physical Confirm key, and
-// TOGGLE_LIGHT only on boards that actually have a frontlight -- but both sit
-// at fixed indices, so the list is truncated from the end rather than reordered.
+// PWR_CONFIRM only makes sense where there is no physical Confirm key, and it
+// sits at a fixed index, so the list is truncated from the end rather than
+// reordered.
 inline std::vector<StrId> buildShortPwrBtnValues() {
-  static constexpr StrId VALUES[] = {StrId::STR_IGNORE,    StrId::STR_SLEEP,   StrId::STR_PAGE_TURN,
-                                     StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES, StrId::STR_CONFIRM,
-                                     StrId::STR_FRONTLIGHT};
-  size_t count = static_cast<size_t>(CrossPointSettings::PWR_CONFIRM);  // IGNORE..FOOTNOTES
-  if (BoardConfig::hasTouch()) count = static_cast<size_t>(CrossPointSettings::TOGGLE_LIGHT);
-  if (Frontlight.present()) count = std::size(VALUES);
+  static constexpr StrId VALUES[] = {StrId::STR_IGNORE,        StrId::STR_SLEEP,     StrId::STR_PAGE_TURN,
+                                     StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES, StrId::STR_CONFIRM};
+  const size_t count =
+      BoardConfig::hasTouch() ? std::size(VALUES) : static_cast<size_t>(CrossPointSettings::PWR_CONFIRM);
   return {VALUES, VALUES + count};
 }
 
@@ -336,12 +334,19 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           buildLongPressMenuValues(), "longPressMenuFunction", StrId::STR_CAT_CONTROLS),
         SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn, buildShortPwrBtnValues(),
                           "shortPwrBtn", StrId::STR_CAT_CONTROLS),
-        // Home-key remap: only offered where a capacitive Home key exists.
-        SettingInfo::Enum(StrId::STR_HOME_KEY_ACTION, &CrossPointSettings::homeKeyAction,
-                          BoardConfig::hasHomeKey()
-                              ? std::vector<StrId>{StrId::STR_HOME_KEY_HOME, StrId::STR_HOME_KEY_TOUCH_REBOOT}
-                              : std::vector<StrId>{StrId::STR_HOME_KEY_HOME},
-                          "homeKeyAction", StrId::STR_CAT_CONTROLS),
+        // Touchscreen master switch. Deliberately a DynamicEnum over the runtime
+        // gate in MappedInputManager rather than a persisted Toggle: a
+        // touch-first device must always come back with its glass alive after a
+        // reboot or a wake, so the "off" state lasts only for this session. The
+        // nullptr key keeps it out of settings.json and out of the web API for
+        // the same reason. Two values, so selecting it flips in place instead of
+        // opening an option popup. If it is switched off with no other way back
+        // in, hold the capacitive Home key for five seconds (see main.cpp).
+        SettingInfo::DynamicEnum(
+            StrId::STR_TOUCHSCREEN, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+            []() -> uint8_t { return MappedInputManager::isTouchInputEnabled() ? 1 : 0; },
+            [](const uint8_t value) { MappedInputManager::setTouchInputEnabled(value != 0); }, nullptr,
+            StrId::STR_CAT_CONTROLS),
         SettingInfo::Toggle(StrId::STR_PWR_BTN_FOOTNOTE_BACK, &CrossPointSettings::pwrBtnFootnoteBack,
                             "pwrBtnFootnoteBack", StrId::STR_CAT_CONTROLS),
         SettingInfo::Toggle(StrId::STR_BACK_SHORT_TO_FILE_BROWSER, &CrossPointSettings::backShortToFileBrowser,
@@ -476,11 +481,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   if (!BoardConfig::hasTouch()) {
     // The toolbar reader menu is touch-first chrome: button boards keep the
     // classic list menu, so the style choice is hidden along with the touch
-    // controls.
+    // controls -- and a board with no glass has nothing to switch off.
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const SettingInfo& s) {
                              return s.nameId == StrId::STR_TOUCH_READER_CONTROLS ||
-                                    s.nameId == StrId::STR_READER_MENU_STYLE;
+                                    s.nameId == StrId::STR_READER_MENU_STYLE ||
+                                    s.nameId == StrId::STR_TOUCHSCREEN;
                            }),
             v.end());
   }

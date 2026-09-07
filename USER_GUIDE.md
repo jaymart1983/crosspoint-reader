@@ -76,10 +76,10 @@ Alternatively, while reading a book, press the **Confirm** button to open the re
 The X4 Pro has a built-in frontlight with adjustable brightness and warmth. It is controlled from a swipe panel rather than the Settings menu:
 
 * **Open the control centre:** Tap the **top centre** of the screen (the status-bar strip) on Home, Browse Files, Settings, or the transfer screen. Drag the brightness and warmth sliders to adjust the light live, or tap the sun icon to turn it on or off. The panel also carries quick tiles for Night Mode, Refresh, Reading Orientation, Touch, **Settings**, and **Home**. The old top-edge swipe-down no longer opens it.
-* **Quick toggle:** With **Short Power Button Click** set to **Frontlight** (the default on the X4 Pro), a short press of the **Power** button turns the frontlight on or off; a long press still puts the device to sleep.
+* **Quick toggle:** **Double-click** the **Power** button to turn the frontlight on or off without opening the panel.
 
 > [!NOTE]
-> Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the swipe panel is the only place to adjust them. The on/off state can also be toggled with the Power-button double-click above.
+> Frontlight brightness and warmth are intentionally not listed in **[Display Settings](#361-display)** — the control centre is the only place to adjust them. The on/off state can also be toggled with the Power-button double-click above.
 
 If the frontlight doesn't come back on after the device wakes from sleep, check **Restore Light on Wake** in **[Display Settings](#361-display)** (on by default). Turning it off is intentional if you'd rather have the light stay off on wake and switch it on yourself each time — but it's easy to forget you changed it.
 
@@ -94,7 +94,37 @@ In the **[Controls Settings](#363-controls)** you can configure the power button
 
 To reboot the device (for example after a firmware update or if it's frozen), press and release the Reset button, and then quickly press and hold the Power button for a few seconds.
 
-On boards with a capacitive **Home** key (X4 Pro), **Controls -> Home Key** can switch that key from **Go Home** to **Touch / Reboot**: a tap then turns the touchscreen off and on again (useful when resting a palm on the glass), and a hold reboots the device. The touchscreen always comes back enabled after a reboot or a wake, so this can never lock you out.
+### Power Button Gestures (X4 Pro)
+
+The X4 Pro has no physical Back or Confirm key, so its Power button carries four
+separate gestures:
+
+| Gesture | Action |
+| --- | --- |
+| Single tap | Select / confirm |
+| Double tap | Frontlight on / off |
+| Hold ~1 second | Back |
+| Hold 5 seconds | Sleep |
+
+A single tap is dispatched a fraction of a second after you lift your finger —
+the device has to wait to see whether a second tap is coming. Back happens when
+you *release* a hold of about a second or more, so holding on past it all the way
+to five seconds sleeps the device without navigating back on the way.
+
+The two side keys are page navigation: **Left turns the page up (back)** and
+**Right turns the page down (forward)**. They work whether or not the
+touchscreen is switched on.
+
+### Turning the Touchscreen Off
+
+**Settings -> Controls -> Touchscreen** switches the glass off — useful when
+resting a palm on the screen while reading. The side keys and the Power-button
+gestures above keep working, so the device stays fully usable.
+
+This is deliberately not saved: the touchscreen always comes back on after a
+reboot or a wake. If you need it back sooner, **hold the capacitive Home key for
+five seconds**. The Home key is never routed through the touch switch, so it
+still works with the glass off.
 
 ### First Launch
 

@@ -82,6 +82,9 @@ class HalGPIO {
   // Capacitive Home key reported by the touch controller (X4 Pro). The tap
   // event fires on release and excludes a long hold.
   bool hasHomeKey() const;
+  // Press edge of the Home key. Needed to time a hold longer than the SDK's own
+  // ~700 ms long-press threshold, which is the only hold event it reports.
+  bool wasHomeKeyPressed() const;
   bool wasHomeKeyTapped() const;
   bool wasHomeKeyLongPressed() const;
   bool wasTouchTap(float& nx, float& ny) const;

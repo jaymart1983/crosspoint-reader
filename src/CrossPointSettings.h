@@ -142,17 +142,37 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     FORCE_REFRESH = 3,
     FOOTNOTES = 4,
     PWR_CONFIRM = 5,
-    TOGGLE_LIGHT = 6,
     SHORT_PWRBTN_COUNT
   };
 
-  // What the capacitive Home key does on boards that have one. Default keeps
-  // the historical behaviour (tap = Home, hold = the reader long-press action).
-  // TOUCH_REBOOT turns the key into the device's hardware-utility key: tap
-  // toggles the touchscreen, hold reboots. The physical "Reset" pinhole on the
-  // Xteink chassis is wired to the ESP32 EN line and is invisible to firmware,
-  // so this key is the only place those two actions can live.
-  enum HOME_KEY_ACTION { HOME_KEY_HOME = 0, HOME_KEY_TOUCH_REBOOT = 1, HOME_KEY_ACTION_COUNT };
+  // --- Power-button gesture timing -------------------------------------------
+  // Boards that answer usesPowerGestures() carry four separate power-button
+  // gestures, told apart only by hold length and click spacing:
+  //
+  //   release <= POWER_CLICK_MAX_HOLD_MS   a click (Select, or a second click
+  //                                        inside the double-tap window ->
+  //                                        frontlight)
+  //   release >= POWER_BACK_HOLD_MS        Back
+  //   still down at POWER_SLEEP_HOLD_MS    Sleep
+  //
+  // The band between the click ceiling and the Back floor is deliberately
+  // inert: that is where a slow tap and a short hold are indistinguishable, and
+  // doing nothing costs the user less than a wrong Back. Back fires on the
+  // RELEASE rather than at the 1 s mark so a press on its way to the 5 s sleep
+  // hold never navigates back en route -- see handlePowerGestureRelease().
+  static constexpr unsigned long POWER_CLICK_MAX_HOLD_MS = 350;
+  // Double-tap window. Kept at the short end of the comfortable range because
+  // every single tap pays it as latency before it can be dispatched as Select.
+  static constexpr unsigned long POWER_DOUBLE_CLICK_MS = 300;
+  static constexpr unsigned long POWER_BACK_HOLD_MS = 1000;
+  static constexpr unsigned long POWER_SLEEP_HOLD_MS = 5000;
+
+  // True on boards whose power button carries the four-gesture scheme above.
+  // The X4 Pro has no physical Back or Confirm key -- touch plus the power
+  // button is the whole input surface -- so the power button has to carry them.
+  // Boards with real Back/Confirm keys keep the historical short-press/long-
+  // press pair untouched.
+  static bool usesPowerGestures() { return BoardConfig::isX4Pro(); }
 
   // Long-press Confirm action while reading an EPUB. The setting cycles through these values.
   // Persisted in settings.json by index: any new function (e.g. dictionary, bookmark) MUST use a
@@ -240,12 +260,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = 1;
-  // Short power button click behaviour. Boards with a frontlight default to
-  // toggling it -- on a touch-first device that is the one thing the power
-  // button is reached for most, and the long press still sleeps.
-  uint8_t shortPwrBtn = FREEINK_CAP_FRONTLIGHT ? TOGGLE_LIGHT : IGNORE;
-  // Capacitive Home key behaviour (HOME_KEY_ACTION).
-  uint8_t homeKeyAction = HOME_KEY_HOME;
+  // Short power button click behaviour. On the X4 Pro a single tap confirms:
+  // there is no physical Confirm key, and the frontlight now lives on the power
+  // DOUBLE tap again rather than competing for the single one. Compile-time
+  // gated, not BoardConfig-gated: this is a default member initialiser on a
+  // global, so it must not depend on another global's initialisation order.
+  uint8_t shortPwrBtn = FREEINK_DEVICE_X4PRO ? PWR_CONFIRM : IGNORE;
   // EPUB reading orientation settings
   // 0 = portrait (default), 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise
   uint8_t orientation = PORTRAIT;
@@ -355,8 +375,16 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   SdFontIdResolver sdFontIdResolver = nullptr;
   void* sdFontResolverCtx = nullptr;
 
+  // How long the power button must be held before the device sleeps.
+  //
+  // SLEEP mode means "a short click sleeps", so the threshold drops to
+  // effectively nothing. Otherwise boards running the four-gesture scheme need
+  // the sleep hold pushed well clear of the 1 s Back hold, hence 5 s; every
+  // other board keeps the historical 400 ms so this change stays scoped to the
+  // devices whose power button had to grow extra jobs.
   uint16_t getPowerButtonDuration() const {
-    return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
+    if (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) return 10;
+    return usesPowerGestures() ? static_cast<uint16_t>(POWER_SLEEP_HOLD_MS) : 400;
   }
   int getReaderFontId() const;
 

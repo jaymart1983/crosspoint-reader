@@ -44,19 +44,30 @@ class MappedInputManager {
   // --- Touchscreen master gate ------------------------------------------------
   // Runtime-only (never persisted): a board whose glass is switched off must
   // always come back with touch alive after a reboot or a wake, otherwise a
-  // touch-first device like the X4 Pro can lock its owner out of the UI. The
-  // capacitive Home key is deliberately NOT gated -- it is the physical key
-  // that toggles this back on.
+  // touch-first device like the X4 Pro can lock its owner out of the UI. Driven
+  // from Settings -> Controls -> Touchscreen. The capacitive Home key is
+  // deliberately NOT gated -- a five-second hold on it is the way back in (see
+  // handleTouchRescueHomeHold in main.cpp), and the side page keys are not gated
+  // either, so the device stays navigable with the glass off.
   static bool isTouchInputEnabled() { return touchInputEnabled; }
   static void setTouchInputEnabled(const bool enabled) { touchInputEnabled = enabled; }
-  static bool toggleTouchInput() {
-    touchInputEnabled = !touchInputEnabled;
-    return touchInputEnabled;
-  }
 #if FREEINK_CAP_TOUCH
-  // X4 Pro delays a single power click until its frontlight double-click window
-  // expires. The main loop supplies that one-frame event here.
-  void setPowerConfirmClickFrame(const bool clicked) { powerConfirmClickFrame = clicked; }
+  // --- One-frame power-button gesture events ---------------------------------
+  // On boards running the four-gesture power scheme (see
+  // CrossPointSettings::usesPowerGestures) the raw power release cannot be acted
+  // on where it happens: a single tap has to wait out the double-tap window
+  // before it is known to be a tap and not the first half of a frontlight
+  // toggle, and a hold only resolves once the button comes back up. main.cpp's
+  // decoder owns that timing and publishes the outcome here for exactly one
+  // frame; MappedInputManager swallows the raw release on those boards so no
+  // consumer can see the same press twice.
+  //
+  // The click frame stands in for the release itself, so every existing
+  // short-power-click consumer (Confirm, page turn, force refresh, footnotes)
+  // keeps working unchanged -- just deferred by the double-tap window.
+  void setPowerClickFrame(const bool clicked) { powerClickFrame = clicked; }
+  // A ~1 s power hold, folded into logical Button::Back below.
+  void setPowerBackFrame(const bool back) { powerBackFrame = back; }
 #endif
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
@@ -149,6 +160,9 @@ class MappedInputManager {
   // Fetch the pending swipe (if any) and map both endpoints to logical screen coords
   bool decodeSwipe(int& sx, int& sy, int& ex, int& ey) const;
 #if FREEINK_CAP_TOUCH
+  // The frame on which a short power click is dispatched: the deferred event on
+  // gesture boards, the raw release everywhere else.
+  bool wasPowerShortClick() const;
   bool wasPowerConfirmClick() const;
 #endif
   void rememberTouchHeldTime() const;
@@ -162,6 +176,7 @@ class MappedInputManager {
   mutable uint16_t longPressFiredButtons = 0;
   mutable uint16_t suppressedReleaseButtons = 0;
 #if FREEINK_CAP_TOUCH
-  bool powerConfirmClickFrame = false;
+  bool powerClickFrame = false;
+  bool powerBackFrame = false;
 #endif
 };

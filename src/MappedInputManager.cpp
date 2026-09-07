@@ -91,6 +91,12 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       return (gpio.*fn)(HalGPIO::BTN_POWER);
     case Button::PageBack:
       // Reader page navigation uses side buttons and can be swapped via settings.
+      // On the X4 Pro the two side keys ARE the only physical navigation keys
+      // (Left=GPIO0 wired to BTN_UP, Right=GPIO7 wired to BTN_DOWN), so the
+      // PREV_NEXT default puts page-up on Left and page-down on Right. None of
+      // this reads the touchscreen gate: the side keys keep turning pages with
+      // the glass switched off, which is the whole point of being able to
+      // switch it off.
       switch (sideLayout) {
         case CrossPointSettings::PREV_NEXT:
           return (gpio.*fn)(isNavDirectionSwapped() ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP);
@@ -305,34 +311,38 @@ bool MappedInputManager::wasMenuGesture() const { return wasTopEdgeDownSwipe(); 
 
 bool MappedInputManager::wasReaderMenuSwipeUp() const { return gpio.hasHomeKey() && wasBottomEdgeUpSwipe(); }
 
-// A Home key remapped to the hardware-utility role (touch toggle / reboot) is
-// owned by main.cpp's global handler, so it must not also navigate.
-static bool homeKeyNavigates() {
-  return SETTINGS.homeKeyAction == CrossPointSettings::HOME_KEY_ACTION::HOME_KEY_HOME;
-}
-
 bool MappedInputManager::wasHomeGesture() const {
-  if (!gpio.hasHomeKey()) return wasBottomEdgeUpSwipe();
-  return homeKeyNavigates() && gpio.wasHomeKeyTapped();
+  return gpio.hasHomeKey() ? gpio.wasHomeKeyTapped() : wasBottomEdgeUpSwipe();
 }
 
 bool MappedInputManager::wasHomeKeyHold() const {
-  return gpio.hasHomeKey() && homeKeyNavigates() && gpio.wasHomeKeyLongPressed();
+  // While the touchscreen is switched off the Home-key hold is reserved for the
+  // five-second touch-rescue gesture in main.cpp, so it must not also run the
+  // reader long-press action on the way there. With touch alive it keeps its
+  // normal job.
+  return gpio.hasHomeKey() && touchInputEnabled && gpio.wasHomeKeyLongPressed();
 }
 
 #if FREEINK_CAP_TOUCH
+bool MappedInputManager::wasPowerShortClick() const {
+  if (!gpio.hasTouch()) return false;
+  // Gesture boards get the deferred event from main.cpp -- their raw release is
+  // still ambiguous at the moment it happens. Other touch boards can act on the
+  // release directly, bounded by the same click ceiling.
+  if (CrossPointSettings::usesPowerGestures()) return powerClickFrame;
+  return gpio.wasReleased(HalGPIO::BTN_POWER) &&
+         gpio.getPowerButtonHeldTime() <= CrossPointSettings::POWER_CLICK_MAX_HOLD_MS;
+}
+
 bool MappedInputManager::wasPowerConfirmClick() const {
-  if (!gpio.hasTouch() || SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM) return false;
-  // Wait out the X4 Pro's frontlight double-click window before treating its
-  // first release as Confirm. Other touch boards can use the release directly.
-  if (BoardConfig::isX4Pro()) return powerConfirmClickFrame;
-  return gpio.wasReleased(HalGPIO::BTN_POWER) && gpio.getPowerButtonHeldTime() <= SETTINGS.getPowerButtonDuration();
+  return SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PWR_CONFIRM && wasPowerShortClick();
 }
 #endif
 
 bool MappedInputManager::wasPressed(const Button button) const {
   if (button == Button::Back && (wasBackGesture() || wasBackButtonTap())) return true;
 #if FREEINK_CAP_TOUCH
+  if (button == Button::Back && powerBackFrame) return true;
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
 #endif
   return mapButton(button, &HalGPIO::wasPressed);
@@ -341,7 +351,13 @@ bool MappedInputManager::wasPressed(const Button button) const {
 bool MappedInputManager::wasReleased(const Button button) const {
   if (button == Button::Back && (wasBackGesture() || wasBackButtonTap())) return true;
 #if FREEINK_CAP_TOUCH
+  if (button == Button::Back && powerBackFrame) return true;
   if (button == Button::Confirm && wasPowerConfirmClick()) return true;
+  // On gesture boards the raw power release belongs to the decoder in main.cpp,
+  // which republishes it as powerClickFrame once it knows the press really was a
+  // click. Returning the raw edge here as well would let a Back or Sleep hold
+  // also fire whatever the short-click action happens to be.
+  if (button == Button::Power && CrossPointSettings::usesPowerGestures()) return powerClickFrame;
 #endif
   return mapButton(button, &HalGPIO::wasReleased);
 }
