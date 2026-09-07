@@ -1,3 +1,8 @@
+// Network feature: the KOReader sync settings screen.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "KOReaderSettingsActivity.h"
 
 #include <GfxRenderer.h>
@@ -169,3 +174,4 @@ void KOReaderSettingsActivity::buildScreen(UiScreen& screen) {
   syncListViewport(screen, props);
   screen.list(props);
 }
+#endif  // FREEINK_CAP_NETWORK

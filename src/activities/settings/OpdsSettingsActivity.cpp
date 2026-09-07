@@ -1,3 +1,8 @@
+// Network feature: the OPDS server editor.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OpdsSettingsActivity.h"
 
 #include <GfxRenderer.h>
@@ -213,3 +218,4 @@ void OpdsSettingsActivity::drawFooter() {
     GUI.drawPopup(renderer, tr(STR_ERROR_GENERAL_FAILURE));
   }
 }
+#endif  // FREEINK_CAP_NETWORK

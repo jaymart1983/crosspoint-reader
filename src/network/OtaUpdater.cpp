@@ -1,3 +1,8 @@
+// Network feature: OTA update checks/installs from GitHub releases.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OtaUpdater.h"
 
 // clang-format off
@@ -229,3 +234,4 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   LOG_INF("OTA", "Update completed");
   return OK;
 }
+#endif  // FREEINK_CAP_NETWORK

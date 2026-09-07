@@ -1,3 +1,8 @@
+// Network feature: the OPDS server list.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OpdsServerListActivity.h"
 
 #include <GfxRenderer.h>
@@ -242,3 +247,4 @@ void OpdsServerListActivity::render(RenderLock&& lock) {
   // indicator; the rest of the screen renders through the base skeleton.
   UiListActivity::render(std::move(lock));
 }
+#endif  // FREEINK_CAP_NETWORK

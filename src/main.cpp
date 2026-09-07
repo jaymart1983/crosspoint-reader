@@ -15,11 +15,13 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <SPI.h>
-#include <WiFi.h>
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
+#if FREEINK_CAP_NETWORK
+#include <WiFi.h>
 #if FREEINK_CAP_TOUCH
 #include <esp_sntp.h>
+#endif
 #endif
 
 #include <cstring>
@@ -27,9 +29,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DeviceSleep.h"
-#include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
-#include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
@@ -37,6 +37,10 @@
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#if FREEINK_CAP_NETWORK
+#include "KOReaderCredentialStore.h"
+#include "OpdsServerStore.h"
+#endif
 #include "images/LoadingIcon.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
@@ -147,7 +151,7 @@ enum class BootResume : uint8_t {
 // startDeepSleep() does not return, so a set latch only ends at the wakeup reset.
 static bool deepSleepInProgress = false;
 
-#if FREEINK_CAP_TOUCH
+#if FREEINK_CAP_NETWORK && FREEINK_CAP_TOUCH
 static bool finishWifiSessionWithoutRestart() {
   if (!BoardConfig::hasTouch()) return false;
 
@@ -165,7 +169,7 @@ static bool finishWifiSessionWithoutRestart() {
 
 void silentRestart() {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-#if FREEINK_CAP_TOUCH
+#if FREEINK_CAP_NETWORK && FREEINK_CAP_TOUCH
   if (finishWifiSessionWithoutRestart()) return;
 #endif
   silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
@@ -182,7 +186,7 @@ void silentRestart() {
 
 void silentRestartToReader() {
   if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
-#if FREEINK_CAP_TOUCH
+#if FREEINK_CAP_NETWORK && FREEINK_CAP_TOUCH
   if (finishWifiSessionWithoutRestart()) return;
 #endif
   silentRebootTarget = SILENT_REBOOT_TARGET_READER;
@@ -337,12 +341,14 @@ void enterDeepSleep(const bool fromTimeout) {
     Storage.remove(SLEEP_FRAME_FILE);
   }
 
+#if FREEINK_CAP_NETWORK
   // Tear down WiFi so the modem power domain isn't held alive across deep sleep.
   // Wake from deep sleep is effectively a chip reset, so no state needs to survive.
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
   }
+#endif
 
   halTiltSensor.deepSleep();
   display.deepSleep();
@@ -482,8 +488,10 @@ void setup() {
   SETTINGS.loadFromFile();
   RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
+#if FREEINK_CAP_NETWORK
   KOREADER_STORE.loadFromFile();
   OPDS_STORE.loadFromFile();
+#endif
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
 

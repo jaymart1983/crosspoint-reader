@@ -1,3 +1,8 @@
+// Network feature: the join-a-network screen.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "WifiSelectionActivity.h"
 
 #include <GfxRenderer.h>
@@ -1110,3 +1115,4 @@ void WifiSelectionActivity::onComplete(const bool connected) {
   setResult(std::move(result));
   finish();
 }
+#endif  // FREEINK_CAP_NETWORK

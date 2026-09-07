@@ -1,3 +1,8 @@
+// Network feature: the OPDS feed parser.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OpdsParser.h"
 
 #include <Logging.h>
@@ -220,3 +225,4 @@ void XMLCALL OpdsParser::characterData(void* userData, const XML_Char* s, const 
     appendBounded(self->currentText, s, len, MAX_ID_CHARS);
   }
 }
+#endif  // FREEINK_CAP_NETWORK

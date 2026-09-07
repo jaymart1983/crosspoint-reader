@@ -1,9 +1,11 @@
 #include "HalClock.h"
 
 #include <Logging.h>
+#include <time.h>
+#if FREEINK_CAP_NETWORK
 #include <WiFi.h>
 #include <esp_sntp.h>
-#include <time.h>
+#endif
 
 HalClock halClock;  // Singleton instance
 
@@ -68,6 +70,12 @@ bool HalClock::formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHou
 
 bool HalClock::syncFromNTP() {
   if (!_available) return false;
+#if !FREEINK_CAP_NETWORK
+  // No network stack on this board: the RTC is set from the manual UTC offset
+  // picker only. Kept as a symbol so HalClock has one declaration everywhere.
+  LOG_ERR("CLK", "NTP sync unavailable in a build without the network stack");
+  return false;
+#else
 
   if (WiFi.status() != WL_CONNECTED) {
     LOG_ERR("CLK", "WiFi not connected, cannot sync NTP");
@@ -109,4 +117,5 @@ bool HalClock::syncFromNTP() {
 
   LOG_ERR("CLK", "NTP sync timed out");
   return false;
+#endif  // FREEINK_CAP_NETWORK
 }

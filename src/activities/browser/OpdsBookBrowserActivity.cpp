@@ -1,3 +1,8 @@
+// Network feature: the OPDS catalogue browser.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OpdsBookBrowserActivity.h"
 
 #include <Arduino.h>
@@ -655,3 +660,4 @@ void OpdsBookBrowserActivity::onWifiSelectionComplete(const bool connected) {
     requestUpdate();
   }
 }
+#endif  // FREEINK_CAP_NETWORK

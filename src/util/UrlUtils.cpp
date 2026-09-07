@@ -1,3 +1,8 @@
+// Network feature: URL helpers used only by the OPDS browser.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "UrlUtils.h"
 
 #include <cstdio>
@@ -92,3 +97,4 @@ std::string buildUrl(const std::string& serverUrl, const std::string& path) {
 }
 
 }  // namespace UrlUtils
+#endif  // FREEINK_CAP_NETWORK

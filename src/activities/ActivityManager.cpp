@@ -11,20 +11,23 @@
 
 #include "CrossPointSettings.h"
 #include "components/themes/BaseTheme.h"
-#include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
-#include "browser/OpdsBookBrowserActivity.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "network/BleTransferActivity.h"
-#include "network/CrossPointWebServerActivity.h"
+#include "network/NetworkModeSelectionActivity.h"
 #include "network/UsbDriveActivity.h"
 #include "reader/ReaderActivity.h"
-#include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
+#if FREEINK_CAP_NETWORK
+#include "OpdsServerStore.h"
+#include "browser/OpdsBookBrowserActivity.h"
+#include "network/CrossPointWebServerActivity.h"
+#include "settings/OpdsServerListActivity.h"
+#endif
 #include "util/BmpViewerActivity.h"
 #include "util/FrontlightPanelActivity.h"
 #include "util/FullScreenMessageActivity.h"
@@ -258,7 +261,14 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
 }
 
 void ActivityManager::goToFileTransfer() {
+#if FREEINK_CAP_NETWORK
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
+#else
+  // No WiFi, so there is no web-server host to own the picker: the mode list is
+  // the whole screen and dispatches USB Drive / Bluetooth Transfer itself (see
+  // NetworkModeSelectionActivity::onModeSelected).
+  replaceActivity(std::make_unique<NetworkModeSelectionActivity>(renderer, mappedInput));
+#endif
 }
 
 void ActivityManager::goToUsbDrive() {
@@ -284,8 +294,8 @@ void ActivityManager::goToBluetoothTransfer() {
     return;
   }
   replaceActivity(std::move(activity));
-#endif
 }
+#endif
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
@@ -297,6 +307,7 @@ void ActivityManager::goToRecentBooks() {
   replaceActivity(std::make_unique<RecentBooksActivity>(renderer, mappedInput));
 }
 
+#if FREEINK_CAP_NETWORK
 void ActivityManager::goToBrowser() {
   const auto& servers = OPDS_STORE.getServers();
   // Skip the server picker when there's only one server configured
@@ -306,6 +317,7 @@ void ActivityManager::goToBrowser() {
     replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
   }
 }
+#endif
 
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
   if (path.empty()) {
@@ -347,9 +359,13 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
     } else if (activityName == "RecentBooks") {
       initialMenuItem = HomeMenuItem::RECENTS;
+#if FREEINK_CAP_NETWORK
     } else if (activityName == "OpdsBookBrowser") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
     } else if (activityName == "CrossPointWebServer") {
+      initialMenuItem = HomeMenuItem::FILE_TRANSFER;
+#endif
+    } else if (activityName == "NetworkModeSelection") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "BleTransfer") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;

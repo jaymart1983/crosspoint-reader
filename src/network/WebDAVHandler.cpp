@@ -1,3 +1,8 @@
+// Network feature: the WebDAV handler, reached only through the web server.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "WebDAVHandler.h"
 
 #include <FsHelpers.h>
@@ -815,3 +820,4 @@ String WebDAVHandler::getMimeType(const String& path) {
   if (FsHelpers::checkFileExtension(path, ".gz")) return "application/gzip";
   return "application/octet-stream";
 }
+#endif  // FREEINK_CAP_NETWORK

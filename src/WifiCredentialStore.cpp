@@ -1,3 +1,8 @@
+// Network feature: the WiFi credential store.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "WifiCredentialStore.h"
 
 #include <CredentialIntegrity.h>
@@ -227,3 +232,4 @@ void WifiCredentialStore::clearAll() {
   saveToFile();
   LOG_DBG("WCS", "Cleared all WiFi credentials");
 }
+#endif  // FREEINK_CAP_NETWORK

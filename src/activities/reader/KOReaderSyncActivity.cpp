@@ -1,3 +1,8 @@
+// Network feature: the KOReader progress sync screen.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "KOReaderSyncActivity.h"
 
 #include <GfxRenderer.h>
@@ -699,3 +704,4 @@ void KOReaderSyncActivity::loop() {
     return;
   }
 }
+#endif  // FREEINK_CAP_NETWORK

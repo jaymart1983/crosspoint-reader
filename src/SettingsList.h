@@ -13,7 +13,9 @@
 #include <vector>
 
 #include "CrossPointSettings.h"
+#if FREEINK_CAP_NETWORK
 #include "KOReaderCredentialStore.h"
+#endif
 #include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
 #include "activities/settings/SettingsActivity.h"
@@ -196,7 +198,16 @@ inline std::vector<StrId> buildLongPressMenuValues() {
   static constexpr StrId VALUES[] = {StrId::STR_KOSYNC, StrId::STR_DISABLED, StrId::STR_BOOKMARK_OPTION,
                                      StrId::STR_DICTIONARY, StrId::STR_READER_MENU};
   const size_t count = BoardConfig::hasHomeKey() ? std::size(VALUES) : std::size(VALUES) - 1;
+#if FREEINK_CAP_NETWORK
   return {VALUES, VALUES + count};
+#else
+  // LP_MENU_KOSYNC (index 0) has nothing to sync to on this build, so it is
+  // dropped from the list. The ENUM options are index-based, so the entry
+  // cannot simply be removed -- the setting below becomes a DynamicEnum that
+  // adds the missing 1 back on the way to CrossPointSettings, leaving the
+  // PERSISTED indices exactly where they have always been.
+  return {VALUES + 1, VALUES + count};
+#endif
 }
 
 // Shared settings list used by both the device settings UI and the web settings API.
@@ -331,8 +342,24 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
                            StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION},
                           "longPressButtonBehavior", StrId::STR_CAT_CONTROLS),
+#if FREEINK_CAP_NETWORK
         SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::longPressMenuFunction,
                           buildLongPressMenuValues(), "longPressMenuFunction", StrId::STR_CAT_CONTROLS),
+#else
+        // Same setting, same persisted field and the same JSON key; only the
+        // UI list has lost its first entry (see buildLongPressMenuValues), so
+        // the getter/setter shift by one. A stored LP_MENU_KOSYNC from a
+        // network build reads back as the first offered option rather than as
+        // an out-of-range index.
+        SettingInfo::DynamicEnum(
+            StrId::STR_LONG_PRESS_MENU, buildLongPressMenuValues(),
+            [] {
+              const uint8_t stored = SETTINGS.longPressMenuFunction;
+              return static_cast<uint8_t>(stored > CrossPointSettings::LP_MENU_KOSYNC ? stored - 1 : 0);
+            },
+            [](const uint8_t v) { SETTINGS.longPressMenuFunction = static_cast<uint8_t>(v + 1); },
+            "longPressMenuFunction", StrId::STR_CAT_CONTROLS),
+#endif
         SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn, buildShortPwrBtnValues(),
                           "shortPwrBtn", StrId::STR_CAT_CONTROLS),
         // Touchscreen master switch. Deliberately a DynamicEnum over the runtime
@@ -367,6 +394,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Toggle(StrId::STR_MOVE_FINISHED_TO_READ, &CrossPointSettings::moveFinishedToReadFolder,
                             "moveFinishedToReadFolder", StrId::STR_CAT_SYSTEM),
 
+#if FREEINK_CAP_NETWORK
         // OPDS download folder: persisted + web-exposed, but category-less so it
         // is hidden from the on-device Settings screen (edited via OPDS UI).
         SettingInfo::String(StrId::STR_OPDS_DOWNLOAD_FOLDER, &SETTINGS.opdsDownloadFolder[0],
@@ -376,6 +404,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_OPDS_FILENAME_FORMAT, &CrossPointSettings::opdsFilenameFormat,
                           {StrId::STR_FMT_AUTHOR_TITLE, StrId::STR_FMT_TITLE_AUTHOR, StrId::STR_FMT_TITLE},
                           "opdsFilenameFormat"),
+#endif  // FREEINK_CAP_NETWORK
 
         // Frontlight quick-panel state: persisted and web-exposed, but hidden
         // from the on-device Settings screen because the swipe panel owns it.
@@ -386,6 +415,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
 #endif
         SettingInfo::Toggle(StrId::STR_FRONTLIGHT, &CrossPointSettings::frontlightOn, "frontlightOn"),
 
+#if FREEINK_CAP_NETWORK
         // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
         SettingInfo::DynamicString(
             StrId::STR_KOREADER_USERNAME, [] { return KOREADER_STORE.getUsername(); },
@@ -432,6 +462,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
               KOREADER_STORE.saveToFile();
             },
             "koSyncBehavior", StrId::STR_KOREADER_SYNC),
+#endif  // FREEINK_CAP_NETWORK
         // --- Status Bar Settings (web-only, uses StatusBarSettingsActivity) ---
         SettingInfo::Toggle(StrId::STR_CHAPTER_PAGE_COUNT, &CrossPointSettings::statusBarChapterPageCount,
                             "statusBarChapterPageCount", StrId::STR_CUSTOMISE_STATUS_BAR),
@@ -460,10 +491,12 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_CLOCK_FORMAT, &CrossPointSettings::clockFormat,
                           {StrId::STR_CLOCK_FORMAT_24H, StrId::STR_CLOCK_FORMAT_12H}, "clockFormat",
                           StrId::STR_CUSTOMISE_STATUS_BAR),
+#if FREEINK_CAP_NETWORK
         // Persistence flag for NTP debounce. Resetting from the web UI forces a re-sync
         // on next WiFi connect, which is useful when crossing time zones.
         SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced",
                             StrId::STR_CUSTOMISE_STATUS_BAR),
+#endif
     };
     // Only show tilt page turn setting when the QMI8658 IMU is present (X3)
     if (halTiltSensor.isAvailable()) {

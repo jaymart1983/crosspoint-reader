@@ -3,8 +3,10 @@
 #include <BoardConfig.h>
 #include <Logging.h>
 #include <PowerManager.h>
-#include <WiFi.h>
 #include <esp_sleep.h>
+#if FREEINK_CAP_NETWORK
+#include <WiFi.h>
+#endif
 #include <soc/soc_caps.h>
 
 #include <cassert>
@@ -36,11 +38,13 @@ void HalPowerManager::setPowerSaving(bool enabled) {
     return;  // invalid state
   }
 
+#if FREEINK_CAP_NETWORK
   auto wifiMode = WiFi.getMode();
   if (wifiMode != WIFI_MODE_NULL) {
     // Wifi is active, force disabling power saving
     enabled = false;
   }
+#endif
 
   // Note: We don't use mutex here to avoid too much overhead,
   // it's not very important if we read a slightly stale value for currentLockMode

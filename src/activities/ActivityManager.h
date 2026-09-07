@@ -17,6 +17,9 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
+// OPDS_BROWSER is kept unconditionally even on FREEINK_CAP_NETWORK=0 builds:
+// it is a transient "which row was I on" hint, never persisted, and HomeActivity
+// simply never produces it when the OPDS row is not built.
 enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
 
 /**
@@ -89,7 +92,9 @@ class ActivityManager {
   void goToSettings();
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();
+#if FREEINK_CAP_NETWORK
   void goToBrowser();
+#endif
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();

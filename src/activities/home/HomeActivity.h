@@ -15,6 +15,9 @@ class HomeActivity final : public Activity {
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
+  // Always false on a FREEINK_CAP_NETWORK=0 build: the OPDS row simply never
+  // appears, and menuItemToIndex/indexToMenuItem below already handle its
+  // absence, so there is no second index layout to maintain.
   bool hasOpdsServers = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
@@ -61,7 +64,9 @@ class HomeActivity final : public Activity {
   void onRecentsOpen();
   void onSettingsOpen();
   void onFileTransferOpen();
+#if FREEINK_CAP_NETWORK
   void onOpdsBrowserOpen();
+#endif
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image

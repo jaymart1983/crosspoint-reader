@@ -1,3 +1,8 @@
+// Network feature: the kosync HTTP client (progress will come over BLE instead).
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "KOReaderSyncClient.h"
 
 #include <ArduinoJson.h>
@@ -312,3 +317,4 @@ const char* KOReaderSyncClient::errorString(Error error) {
       return "Unknown error";
   }
 }
+#endif  // FREEINK_CAP_NETWORK

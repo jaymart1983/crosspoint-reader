@@ -1,3 +1,8 @@
+// Network feature: the web server / hotspot host activity.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "CrossPointWebServerActivity.h"
 
 #include <DNSServer.h>
@@ -148,10 +153,12 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   networkMode = mode;
   isApMode = (mode == NetworkMode::CREATE_HOTSPOT);
 
+#if FREEINK_CAP_BLE_TRANSFER
   if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
     activityManager.goToBluetoothTransfer();
     return;
   }
+#endif
 
   if (mode == NetworkMode::CONNECT_CALIBRE) {
     startActivityForResult(
@@ -538,3 +545,4 @@ void CrossPointWebServerActivity::renderWifiIndicator(int subHeaderTop) const {
     renderer.drawLine(x0, y0 + xSize, x0 + xSize, y0, 2, true);
   }
 }
+#endif  // FREEINK_CAP_NETWORK

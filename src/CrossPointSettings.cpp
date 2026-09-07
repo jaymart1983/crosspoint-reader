@@ -92,6 +92,13 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   // option lists depend on the SD font registry), so the generic loop skips them.
   doc["fontFamily"] = fontFamily;
   doc["fontSize"] = fontPointSize;
+#if !FREEINK_CAP_NETWORK
+  // Long-press menu action — a DynamicEnum on builds with no network stack (its
+  // option list drops LP_MENU_KOSYNC, so UI index != stored value), which means
+  // the generic loop above skips it. The value written is the raw
+  // LONG_PRESS_MENU_FUNCTION index, identical to what a network build writes.
+  doc["longPressMenuFunction"] = longPressMenuFunction;
+#endif
   // SD card font family name — not in SettingsList, save manually
   if (sdFontFamilyName[0] != '\0') {
     doc["sdFontFamilyName"] = sdFontFamilyName;
@@ -222,6 +229,15 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   }
   // Dictionary folder name — uses dynamic getter/setter in SettingsList, load manually
   copyToField(dictionaryName, doc["dictionaryName"] | "", sizeof(dictionaryName));
+
+#if !FREEINK_CAP_NETWORK
+  // See the matching note in toJson(). A file written by a build WITH the
+  // network stack can carry LP_MENU_KOSYNC, which this build cannot perform, so
+  // it folds to LP_MENU_DISABLED rather than leaving a hold that does nothing.
+  const uint8_t storedLongPressMenu = doc["longPressMenuFunction"] | static_cast<uint8_t>(LP_MENU_DISABLED);
+  longPressMenuFunction = clamp(storedLongPressMenu, LONG_PRESS_MENU_FUNCTION_COUNT, LP_MENU_DISABLED);
+  if (longPressMenuFunction == LP_MENU_KOSYNC) longPressMenuFunction = LP_MENU_DISABLED;
+#endif
 
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {

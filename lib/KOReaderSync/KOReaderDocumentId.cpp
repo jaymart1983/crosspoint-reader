@@ -1,3 +1,8 @@
+// Network feature: kosync document hashing.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "KOReaderDocumentId.h"
 
 #include <HalStorage.h>
@@ -92,3 +97,4 @@ std::string KOReaderDocumentId::calculate(const std::string& filePath) {
 
   return result;
 }
+#endif  // FREEINK_CAP_NETWORK

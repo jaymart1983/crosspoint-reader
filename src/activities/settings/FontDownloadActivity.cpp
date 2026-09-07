@@ -1,3 +1,8 @@
+// Network feature: font downloads over HTTPS.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "FontDownloadActivity.h"
 
 #include <ArduinoJson.h>
@@ -905,3 +910,4 @@ void FontDownloadActivity::render(RenderLock&&) {
 
   renderer.displayBuffer();
 }
+#endif  // FREEINK_CAP_NETWORK

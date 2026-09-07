@@ -22,9 +22,15 @@ class NetworkModeSelectionActivity final : public UiListActivity {
  public:
   explicit NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
-  // Base rows: Join / Calibre / Hotspot. USB Drive and Bluetooth Transfer are
-  // each capability-gated, so the count is computed rather than hardcoded.
-  static constexpr int MENU_ITEM_COUNT = 3
+  // Every row is capability-gated, so the count is computed rather than
+  // hardcoded: Join / Calibre / Hotspot need the network stack, USB Drive needs
+  // USB-MSC, Bluetooth Transfer needs BLE. On a FREEINK_CAP_NETWORK=0 board this
+  // list is USB Drive + Bluetooth Transfer, and it is a top-level screen rather
+  // than a sub-activity of the web server (see onModeSelected).
+  static constexpr int MENU_ITEM_COUNT = 0
+#if FREEINK_CAP_NETWORK
+                                         + 3
+#endif
 #if FREEINK_CAP_USB_MSC
                                          + 1
 #endif

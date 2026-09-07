@@ -1,3 +1,8 @@
+// Network feature: the Calibre wireless connect flow.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "CalibreConnectActivity.h"
 
 #include <ESPmDNS.h>
@@ -239,3 +244,4 @@ void CalibreConnectActivity::render(RenderLock&&) {
   }
   renderer.displayBuffer();
 }
+#endif  // FREEINK_CAP_NETWORK

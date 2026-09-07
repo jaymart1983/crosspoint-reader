@@ -1,3 +1,8 @@
+// Network feature: KOReader sync authentication.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "KOReaderAuthActivity.h"
 
 #include <GfxRenderer.h>
@@ -118,3 +123,4 @@ void KOReaderAuthActivity::loop() {
     }
   }
 }
+#endif  // FREEINK_CAP_NETWORK

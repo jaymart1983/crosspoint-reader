@@ -1,3 +1,8 @@
+// Network feature: NTP clock sync.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "ClockSyncActivity.h"
 
 #include <GfxRenderer.h>
@@ -144,3 +149,4 @@ void ClockSyncActivity::render(RenderLock&&) {
 
   renderer.displayBuffer();
 }
+#endif  // FREEINK_CAP_NETWORK

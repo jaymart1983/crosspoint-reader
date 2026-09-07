@@ -1,3 +1,8 @@
+// Network feature: the saved OPDS server store.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OpdsServerStore.h"
 
 #include <Logging.h>
@@ -82,3 +87,4 @@ const OpdsServer* OpdsServerStore::getServer(size_t index) const {
   }
   return &servers[index];
 }
+#endif  // FREEINK_CAP_NETWORK

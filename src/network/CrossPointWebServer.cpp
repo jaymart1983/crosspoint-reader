@@ -1,3 +1,8 @@
+// Network feature: the on-device web server (file transfer UI, web settings API, WebSocket uploads).
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "CrossPointWebServer.h"
 
 #include <ArduinoJson.h>
@@ -1977,3 +1982,4 @@ void CrossPointWebServer::handleFontDelete() {
     LOG_ERR("WEB", "Failed to delete font family: %s", familyName);
   }
 }
+#endif  // FREEINK_CAP_NETWORK

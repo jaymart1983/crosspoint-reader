@@ -4,6 +4,7 @@
 #include <I18n.h>
 
 #include "MappedInputManager.h"
+#include "activities/ActivityManager.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 
@@ -11,9 +12,11 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+#if FREEINK_CAP_NETWORK
     StrId::STR_JOIN_NETWORK,
     StrId::STR_CALIBRE_WIRELESS,
     StrId::STR_CREATE_HOTSPOT,
+#endif
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE,
 #endif
@@ -22,9 +25,11 @@ constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #endif
 };
 constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+#if FREEINK_CAP_NETWORK
     StrId::STR_JOIN_DESC,
     StrId::STR_CALIBRE_DESC,
     StrId::STR_HOTSPOT_DESC,
+#endif
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE_DESC,
 #endif
@@ -33,9 +38,11 @@ constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #endif
 };
 constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+#if FREEINK_CAP_NETWORK
     UIIcon::Wifi,
     UIIcon::Library,
     UIIcon::Hotspot,
+#endif
 #if FREEINK_CAP_USB_MSC
     UIIcon::Usb,
 #endif
@@ -44,9 +51,11 @@ constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
 #endif
 };
 constexpr NetworkMode menuModes[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
+#if FREEINK_CAP_NETWORK
     NetworkMode::JOIN_NETWORK,
     NetworkMode::CONNECT_CALIBRE,
     NetworkMode::CREATE_HOTSPOT,
+#endif
 #if FREEINK_CAP_USB_MSC
     NetworkMode::USB_DRIVE,
 #endif
@@ -103,6 +112,23 @@ void NetworkModeSelectionActivity::buildScreen(UiScreen& screen) {
 }
 
 void NetworkModeSelectionActivity::onModeSelected(NetworkMode mode) {
+#if !FREEINK_CAP_NETWORK
+  // No network stack means no CrossPointWebServerActivity to hand the choice
+  // back to, so this screen is pushed as a top-level activity and dispatches
+  // the two remaining transports itself.
+#if FREEINK_CAP_USB_MSC
+  if (mode == NetworkMode::USB_DRIVE) {
+    activityManager.goToUsbDrive();
+    return;
+  }
+#endif
+#if FREEINK_CAP_BLE_TRANSFER
+  if (mode == NetworkMode::BLUETOOTH_TRANSFER) {
+    activityManager.goToBluetoothTransfer();
+    return;
+  }
+#endif
+#endif
   setResult(NetworkModeResult{mode});
   finish();
 }

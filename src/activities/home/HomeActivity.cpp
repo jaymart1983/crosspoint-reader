@@ -17,7 +17,9 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
+#if FREEINK_CAP_NETWORK
 #include "OpdsServerStore.h"
+#endif
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -113,7 +115,12 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 void HomeActivity::onEnter() {
   Activity::onEnter();
 
+#if FREEINK_CAP_NETWORK
   hasOpdsServers = OPDS_STORE.hasServers();
+#endif
+  // On a FREEINK_CAP_NETWORK=0 build hasOpdsServers stays false for the life of
+  // the screen, so the OPDS row is never built and every index that follows it
+  // shifts down on its own -- no separate no-network layout to keep in step.
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   loadRecentBooks(metrics.homeRecentBooksCount);
@@ -185,9 +192,11 @@ void HomeActivity::loop() {
       case HomeMenuItem::RECENTS:
         onRecentsOpen();
         break;
+#if FREEINK_CAP_NETWORK
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
         break;
+#endif
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
         break;
@@ -358,4 +367,6 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
+#if FREEINK_CAP_NETWORK
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+#endif

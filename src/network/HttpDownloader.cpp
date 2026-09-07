@@ -1,3 +1,8 @@
+// Network feature: the HTTP(S) download helper.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "HttpDownloader.h"
 
 #include <Arduino.h>
@@ -326,3 +331,4 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   LOG_DBG("HTTP", "Downloaded %zu bytes", sink.downloaded);
   return OK;
 }
+#endif  // FREEINK_CAP_NETWORK

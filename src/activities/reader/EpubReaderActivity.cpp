@@ -27,8 +27,10 @@
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#if FREEINK_CAP_NETWORK
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
+#endif
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
@@ -482,11 +484,13 @@ void EpubReaderActivity::loop() {
         bookmarkMessageTime = millis();
         requestUpdate();
         break;
+#if FREEINK_CAP_NETWORK
       case CrossPointSettings::LP_MENU_KOSYNC:
         if (launchKOReaderSync()) {
           return;
         }
         break;
+#endif
       case CrossPointSettings::LP_MENU_DICTIONARY:
         openDictionaryWordSelect();
         return;
@@ -510,9 +514,11 @@ void EpubReaderActivity::loop() {
           requestUpdate();
         }
         return;
+#if FREEINK_CAP_NETWORK
       case CrossPointSettings::LP_MENU_KOSYNC:
         launchKOReaderSync();
         return;
+#endif
       case CrossPointSettings::LP_MENU_DICTIONARY:
         if (!showDictionaryMessage) {
           openDictionaryWordSelect();
@@ -893,7 +899,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::SYNC: {
+#if FREEINK_CAP_NETWORK
       launchKOReaderSync();
+#endif
+      // The row is not built on a FREEINK_CAP_NETWORK=0 build (see
+      // EpubReaderMenuActivity::buildMenuItems), so this arm is unreachable
+      // there -- but it stays listed so -Wswitch keeps covering this switch.
       break;
     }
     case EpubReaderMenuActivity::MenuAction::BOOKMARKS: {
@@ -914,8 +925,10 @@ unsigned long EpubReaderActivity::confirmLongPressThreshold() const {
     case CrossPointSettings::LP_MENU_BOOKMARK:
     case CrossPointSettings::LP_MENU_DICTIONARY:
       return ReaderUtils::BOOKMARK_HOLD_MS;
+#if FREEINK_CAP_NETWORK
     case CrossPointSettings::LP_MENU_KOSYNC:
       return KOREADER_STORE.hasCredentials() ? ReaderUtils::GO_HOME_MS : 0;
+#endif
     case CrossPointSettings::LP_MENU_READER_MENU:
     case CrossPointSettings::LP_MENU_DISABLED:
     default:
@@ -923,6 +936,7 @@ unsigned long EpubReaderActivity::confirmLongPressThreshold() const {
   }
 }
 
+#if FREEINK_CAP_NETWORK
 bool EpubReaderActivity::launchKOReaderSync() {
   if (!KOREADER_STORE.hasCredentials()) return false;
 
@@ -967,6 +981,7 @@ bool EpubReaderActivity::launchKOReaderSync() {
       std::move(localChapterName), paragraphIndex));
   return true;
 }
+#endif  // FREEINK_CAP_NETWORK
 
 void EpubReaderActivity::applyInitialOrientation() {
   ReaderActivity::applyInitialOrientation();

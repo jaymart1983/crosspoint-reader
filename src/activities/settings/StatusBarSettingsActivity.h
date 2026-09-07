@@ -11,7 +11,13 @@ class StatusBarSettingsActivity final : public UiListActivity {
 
   // Must equal ITEM_COUNT in the .cpp (static_assert'd there) — the max
   // possible row count (RTC-equipped devices show all of them).
+  // 11 rows, less the "Sync Now" row on boards with no network stack: NTP is
+  // the only thing that row does. The manual UTC offset picker stays.
+#if FREEINK_CAP_NETWORK
   static constexpr int MAX_STATUS_BAR_ITEMS = 11;
+#else
+  static constexpr int MAX_STATUS_BAR_ITEMS = 10;
+#endif
 
   void onEnter() override;
   void render(RenderLock&&) override;

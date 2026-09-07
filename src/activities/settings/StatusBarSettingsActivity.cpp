@@ -8,7 +8,9 @@
 #include <memory>
 
 #include "ClockOffsetActivity.h"
+#if FREEINK_CAP_NETWORK
 #include "ClockSyncActivity.h"
+#endif
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
@@ -30,7 +32,9 @@ enum MenuItem {
   ITEM_CLOCK,             // X3 only
   ITEM_CLOCK_FORMAT,      // X3 only
   ITEM_CLOCK_UTC_OFFSET,  // X3 only, launches ClockOffsetActivity
-  ITEM_CLOCK_SYNC,        // X3 only, launches ClockSyncActivity
+#if FREEINK_CAP_NETWORK
+  ITEM_CLOCK_SYNC,  // X3 only, launches ClockSyncActivity (NTP over WiFi)
+#endif
   ITEM_COUNT
 };
 
@@ -50,7 +54,9 @@ const StrId menuNames[FULL_MENU_ITEMS] = {
     StrId::STR_CLOCK,
     StrId::STR_CLOCK_FORMAT,
     StrId::STR_CLOCK_UTC_OFFSET,
+#if FREEINK_CAP_NETWORK
     StrId::STR_CLOCK_SYNC_NOW,
+#endif
 };
 
 constexpr int CLOCK_FORMAT_ITEMS = 2;
@@ -194,9 +200,11 @@ void StatusBarSettingsActivity::handleSelection() {
       // Launch the dedicated offset picker. It saves on exit, no result handler needed.
       startActivityForResult(std::make_unique<ClockOffsetActivity>(renderer, mappedInput), nullptr);
       return;
+#if FREEINK_CAP_NETWORK
     case ITEM_CLOCK_SYNC:
       startActivityForResult(std::make_unique<ClockSyncActivity>(renderer, mappedInput), nullptr);
       return;
+#endif
     default:
       return;
   }
@@ -227,8 +235,10 @@ std::string StatusBarSettingsActivity::rowValueText(const int index) {
     }
     case ITEM_CLOCK_UTC_OFFSET:
       return formatUtcOffset(SETTINGS.clockUtcOffsetQ);
+#if FREEINK_CAP_NETWORK
     case ITEM_CLOCK_SYNC:
       return SETTINGS.clockHasBeenSynced ? tr(STR_CLOCK_SYNCED) : tr(STR_NOT_SET);
+#endif
     default:
       return tr(STR_HIDE);
   }

@@ -1,3 +1,8 @@
+// Network feature: the GitHub-release update screen.
+// Compiled out entirely on boards that answer FREEINK_CAP_NETWORK=0
+// (see [base].build_flags_nonet in platformio.ini).
+#if FREEINK_CAP_NETWORK
+
 #include "OtaUpdateActivity.h"
 
 #include <GfxRenderer.h>
@@ -238,3 +243,4 @@ void OtaUpdateActivity::loop() {
     ESP.restart();
   }
 }
+#endif  // FREEINK_CAP_NETWORK
