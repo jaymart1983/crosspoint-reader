@@ -43,6 +43,9 @@ class EpubReaderActivity final : public ReaderActivity {
   // Non-zero once a book has failed to index: the reader leaves shortly after,
   // so the message is readable but the screen is not a dead end.
   unsigned long buildFailedExitAt = 0UL;
+  // How many unreadable spine items have been stepped over for this book.
+  int skippedSections = 0;
+  static constexpr int MAX_SKIPPED_SECTIONS = 5;
   static constexpr unsigned long BUILD_FAILED_DWELL_MS = 2500UL;
   // Below this, a failed section build is far more likely to be the card than
   // the book. A section's temp HTML is comfortably under a megabyte; 4 MB is

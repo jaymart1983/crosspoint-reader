@@ -6,9 +6,118 @@
 #include <Serialization.h>
 
 #include "Epub/css/CssParser.h"
+#include <cctype>
+
 #include "Page.h"
 #include "hyphenation/Hyphenator.h"
 #include "parsers/ChapterHtmlSlimParser.h"
+
+namespace {
+
+/**
+ * Rewrites unclosed HTML void elements as self-closing, in a single pass.
+ *
+ * XHTML files in the wild are frequently not well-formed XML: `<meta charset>`,
+ * `<br>` and `<img>` are routinely written HTML-style with no trailing slash.
+ * expat is a strict XML parser and rejects the document at the first mismatched
+ * close tag, which on a Gutenberg EPUB is `</head>` -- so the book fails to
+ * index at spine item 0 and cannot be opened at all.
+ *
+ * Only tags in the HTML void set are touched, and only when they are not
+ * already self-closed. Anything else -- text, attributes, quoted `>` inside an
+ * attribute value -- passes through byte for byte.
+ */
+class VoidTagClosingPrint : public Print {
+ public:
+  explicit VoidTagClosingPrint(Print& out) : out_(out) {}
+
+  size_t write(const uint8_t byte) override {
+    const char c = static_cast<char>(byte);
+    if (!inTag_) {
+      if (c == '<') {
+        inTag_ = true;
+        inQuote_ = 0;
+        tag_.assign(1, c);
+        return 1;
+      }
+      return out_.write(byte);
+    }
+
+    // Inside a tag: buffer it whole so the decision can be made at '>'.
+    tag_.push_back(c);
+    if (inQuote_ != 0) {
+      if (c == inQuote_) inQuote_ = 0;
+      return 1;
+    }
+    if (c == '"' || c == '\'') {
+      inQuote_ = c;
+      return 1;
+    }
+    if (c != '>') {
+      // A pathological "tag" that never closes must not grow without bound.
+      if (tag_.size() > MAX_TAG_BYTES) {
+        flushPending();
+      }
+      return 1;
+    }
+
+    inTag_ = false;
+    emitTag();
+    return 1;
+  }
+
+  size_t write(const uint8_t* buffer, const size_t size) override {
+    for (size_t i = 0; i < size; i++) write(buffer[i]);
+    return size;
+  }
+
+  /// Emits anything still buffered. Call once the source is exhausted.
+  void flushPending() {
+    if (tag_.empty()) return;
+    out_.write(reinterpret_cast<const uint8_t*>(tag_.data()), tag_.size());
+    tag_.clear();
+    inTag_ = false;
+    inQuote_ = 0;
+  }
+
+ private:
+  static constexpr size_t MAX_TAG_BYTES = 4096;
+
+  static bool isVoidName(const std::string& name) {
+    static const char* kVoid[] = {"area", "base",  "br",   "col",   "embed",  "hr",    "img",
+                                  "input", "link", "meta", "param", "source", "track", "wbr"};
+    for (const char* v : kVoid) {
+      if (name == v) return true;
+    }
+    return false;
+  }
+
+  void emitTag() {
+    // tag_ is "<...>"; needs at least "<a>".
+    if (tag_.size() >= 3 && tag_[1] != '/' && tag_[1] != '!' && tag_[1] != '?' &&
+        tag_[tag_.size() - 2] != '/') {
+      size_t i = 1;
+      std::string name;
+      while (i < tag_.size() && (std::isalnum(static_cast<unsigned char>(tag_[i])) || tag_[i] == '-')) {
+        name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(tag_[i]))));
+        i++;
+      }
+      if (isVoidName(name)) {
+        // Insert the slash before '>', preserving everything else verbatim.
+        tag_.insert(tag_.size() - 1, "/");
+      }
+    }
+    out_.write(reinterpret_cast<const uint8_t*>(tag_.data()), tag_.size());
+    tag_.clear();
+  }
+
+  Print& out_;
+  std::string tag_;
+  bool inTag_ = false;
+  char inQuote_ = 0;
+};
+
+}  // namespace
 
 namespace {
 // v28: text decoration bits now include line-through in serialized wordStyles.
@@ -319,7 +428,20 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
       // Larger chunks mean far fewer SD writes inflating the HTML; a 1KB chunk turned a 584KB
       // single-spine novel into ~570 tiny writes (multi-second). 8KB keeps the transient buffers
       // small while cutting the write count 8x.
-      streamed = epub->readItemContentsToStream(localPath, tmpHtml, 8192);
+      // Through a filter that closes HTML void elements.
+      //
+      // The section HTML is parsed by expat, which is a strict XML parser and is
+      // strictly correct to reject <meta charset="utf-8"> in an XHTML document.
+      // Project Gutenberg's ebookmaker emits exactly that, so </head> arrived
+      // with <meta> still open, expat said "mismatched tag", and the book died on
+      // spine item 0 -- every Gutenberg EPUB on this device, opened or not.
+      //
+      // Every other reader tolerates it, so we do too: rewrite the void elements
+      // as self-closing on the way to disk. Done here rather than in the phone
+      // app because a book side-loaded over USB has to work as well.
+      VoidTagClosingPrint filtered(tmpHtml);
+      streamed = epub->readItemContentsToStream(localPath, filtered, 8192);
+      filtered.flushPending();
       fileSize = tmpHtml.size();
       // Explicitly close() file before calling Storage.remove()
       tmpHtml.close();
@@ -455,6 +577,29 @@ bool Section::buildSomeMore(const int maxPages) {
   for (;;) {
     const auto status = build_->parser->parseStep();
     if (status == ChapterHtmlSlimParser::ParseStatus::Error) {
+      // A cached HTML that will not parse is POISON: startBuild treats the mere
+      // existence of htmlPath as "known-complete" and reuses it forever, so one
+      // truncated file makes a book unopenable permanently -- which is how every
+      // book on this device ended up failing to index after the card was
+      // detached mid-write during a USB Drive handoff.
+      //
+      // Throw the cache away so the next attempt re-extracts from the EPUB. The
+      // EPUB is the source of truth; this file is only ever an optimisation, and
+      // an optimisation that cannot be discarded is a liability.
+      if (build_ && build_->reusedHtml && !build_->htmlPath.empty()) {
+        LOG_ERR("SCT", "Cached HTML %s will not parse; discarding it so the next open rebuilds",
+                build_->htmlPath.c_str());
+        const std::string poisoned = build_->htmlPath;
+        abandonBuild();
+        Storage.remove(poisoned.c_str());
+        // The section index derived from that HTML describes pages that no
+        // longer have a source; leaving it behind would fail the same way.
+        // filePath is that index (sections/<spineIndex>.bin).
+        if (!filePath.empty() && Storage.exists(filePath.c_str())) {
+          Storage.remove(filePath.c_str());
+        }
+        return false;
+      }
       LOG_ERR("SCT", "Parse error during incremental build");
       abandonBuild();
       return false;

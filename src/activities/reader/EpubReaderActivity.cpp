@@ -1147,6 +1147,27 @@ void EpubReaderActivity::renderBook() {
     GUI.drawPopup(renderer, tr(STR_SAVE_PROGRESS_FAILED));
   };
 
+  // A spine item that will not parse costs that item, not the book.
+  //
+  // Calibre wraps a cover in a tiny XHTML file whose body is an SVG embedding
+  // the image; our slim parser rejects it ("mismatched tag" on a 462-byte
+  // wrap0000.html), and because that wrapper is spine item 0, EVERY book made
+  // that way was unopenable. Skipping to the next item costs a cover page and
+  // gains the novel.
+  //
+  // Bounded: if nothing in the book parses, the error still stands rather than
+  // walking the whole spine looking for something that is not there.
+  const auto skipUnreadableSection = [this]() -> bool {
+    if (skippedSections >= MAX_SKIPPED_SECTIONS) return false;
+    if (currentSpineIndex + 1 >= epub->getSpineItemsCount()) return false;
+    ++skippedSections;
+    ++currentSpineIndex;
+    LOG_ERR("ERS", "spine item %d will not parse; skipping to %d", currentSpineIndex - 1, currentSpineIndex);
+    section.reset();
+    requestUpdate();
+    return true;
+  };
+
   const auto showBuildError = [this]() {
     renderer.clearScreen();
     // "Invalid book" is only one of the reasons a build fails, and it is the
@@ -1278,8 +1299,9 @@ void EpubReaderActivity::renderBook() {
           }
           if (!started) {
             LOG_ERR("ERS", "Failed to start section build");
-            section.reset();
             buildPopupPending = false;
+            if (skipUnreadableSection()) return;
+            section.reset();
             showBuildError();
             return;
           }
@@ -1292,8 +1314,9 @@ void EpubReaderActivity::renderBook() {
             }
             if (!section->buildSomeMore(BUILD_PAGES_PER_CHUNK)) {
               LOG_ERR("ERS", "Failed during incremental section build");
-              section.reset();
               buildPopupPending = false;
+              if (skipUnreadableSection()) return;
+              section.reset();
               showBuildError();
               return;
             }

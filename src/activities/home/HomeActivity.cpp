@@ -446,17 +446,23 @@ void HomeActivity::render(RenderLock&&) {
   // Record the tile rect so storeCoverBuffer (called from the theme) knows
   // which sub-region of the framebuffer to snapshot. ~16 KB in Portrait
   // instead of the 48 KB full framebuffer the previous bind captured.
+  // Nothing to snapshot: the cover tile is gone, so the partial-restore path
+  // has no region to preserve.
   coverRectX = 0;
-  coverRectY = metrics.homeTopPadding;
-  coverRectW = pageWidth;
-  coverRectH = metrics.homeCoverTileHeight;
+  coverRectY = 0;
+  coverRectW = 0;
+  coverRectH = 0;
 
-  const Rect tile{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight};
+  // No cover tile. The Library is a list, and the tile was still being painted
+  // at homeTopPadding with its full height -- straight over the header, which
+  // now occupies that space. That is the black block and the grey slab across
+  // the top, and why the title bar could not be seen.
+  //
+  // The empty-shelf message moves into the list area, under the header, for the
+  // same reason.
   if (homeBooks.empty()) {
-    renderEmptyShelf(tile);
-  } else {
-    GUI.drawRecentBookCover(renderer, tile, homeBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
-                            std::bind(&HomeActivity::storeCoverBuffer, this));
+    const int top = libraryListTop(metrics);
+    renderEmptyShelf(Rect{0, top, pageWidth, pageHeight - top - metrics.buttonHintsHeight});
   }
 
   // Books first, then the two rows that are not books.
@@ -500,9 +506,12 @@ void HomeActivity::render(RenderLock&&) {
   const int menuBottomReserve = mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight;
   GUI.drawButtonMenu(
       renderer,
+      // Height derived from the SAME top the list is drawn at. The old
+      // expression still subtracted homeTopPadding as well as headerHeight,
+      // double-counting a band that is no longer there and leaving the row
+      // geometry disagreeing with the space it was given.
       Rect{0, libraryListTop(metrics), pageWidth,
-           pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
-                         metrics.homeMenuTopOffset + menuBottomReserve)},
+           pageHeight - libraryListTop(metrics) - menuBottomReserve - metrics.verticalSpacing},
       static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - coverCount,
       [&menuItems](int index) { return menuItems[index]; }, [&menuIcons](int index) { return menuIcons[index]; });
@@ -517,16 +526,36 @@ void HomeActivity::render(RenderLock&&) {
     const int pages = pageCount();
     const bool canUp = pageIndex > 0;
     const bool canDown = pageIndex + 1 < pages;
-    renderer.drawLine(0, barY, pageWidth, barY, true);
+    // pageWidth is one PAST the last valid column (0..pageWidth-1), so drawing to
+    // it puts a pixel off-panel every frame -- which the renderer then reports,
+    // and those reports flood the serial console.
+    renderer.drawLine(0, barY, pageWidth - 1, barY, true);
     pagerBarY = barY;
     pagerBarHeight = band;
     pagerSplitX = half;
     const Rect pageUpRect{0, barY, half, band};
-    const Rect pageDownRect{half, barY, pageWidth - half, band};
+    const Rect pageDownRect{half, barY, pageWidth - half - 1, band};
     renderer.drawLine(half, barY + 4, half, barY + band - 4, true);
 
-    // Greyed is drawn as a lighter glyph rather than omitted: an arrow that is
-    // there but inert says "this is the first page"; a missing one says nothing.
+    // Disabled is drawn DIMMER, not struck through. A slash reads as "forbidden"
+    // and drew the eye to the one arrow that does nothing; the panel is 1-bit and
+    // has no grey, so the dimming is a dotted stroke -- every other pixel -- which
+    // at this size reads as grey from any normal distance.
+    const auto dottedLine = [&](int x0, int y0, const int x1, const int y1) {
+      const int dx = std::abs(x1 - x0);
+      const int dy = -std::abs(y1 - y0);
+      const int sx = x0 < x1 ? 1 : -1;
+      const int sy = y0 < y1 ? 1 : -1;
+      int err = dx + dy;
+      int n = 0;
+      while (true) {
+        if ((n++ % 2) == 0) renderer.drawPixel(x0, y0, true);
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+      }
+    };
     const auto arrow = [&](const Rect& r, const bool up, const bool enabled) {
       const int cx = r.x + r.width / 2;
       const int cy = r.y + r.height / 2;
@@ -534,11 +563,12 @@ void HomeActivity::render(RenderLock&&) {
       const int h = 6;
       const int tipY = up ? cy - h : cy + h;
       const int baseY = up ? cy + h : cy - h;
-      renderer.drawLine(cx - w, baseY, cx, tipY, true);
-      renderer.drawLine(cx + w, baseY, cx, tipY, true);
-      if (!enabled) {
-        // Struck through: the panel has no grey, so "disabled" has to be a shape.
-        renderer.drawLine(cx - w - 2, cy + h + 2, cx + w + 2, cy - h - 2, true);
+      if (enabled) {
+        renderer.drawLine(cx - w, baseY, cx, tipY, true);
+        renderer.drawLine(cx + w, baseY, cx, tipY, true);
+      } else {
+        dottedLine(cx - w, baseY, cx, tipY);
+        dottedLine(cx + w, baseY, cx, tipY);
       }
     };
     arrow(pageUpRect, /*up=*/true, canUp);

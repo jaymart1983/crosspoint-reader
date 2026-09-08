@@ -970,6 +970,23 @@ void loop() {
       handoffUsbOtgToSerialJtag();
       ESP.restart();
     }
+    // Any button takes the card back. The host ejecting is the normal way out,
+    // but a reader that can only be freed by the computer it is plugged into
+    // looks broken whenever that computer is not cooperating -- and with nothing
+    // drawn and no input answered, "looks broken" is indistinguishable from is.
+    if (mappedInputManager.wasPressed(MappedInputManager::Button::Back) ||
+        mappedInputManager.wasPressed(MappedInputManager::Button::Confirm) ||
+        mappedInputManager.wasPressed(MappedInputManager::Button::Up) ||
+        mappedInputManager.wasPressed(MappedInputManager::Button::Down) ||
+        mappedInputManager.wasPressed(MappedInputManager::Button::Power)) {
+      LOG_INF("USB", "user ended USB Drive from the device");
+      Storage.endUsbDrive();
+      Storage.setUsbDriveHandoffPending(false);
+      silentRebootTarget = SILENT_REBOOT_TARGET_HOME;
+      silentRebootMagic = SILENT_REBOOT_MAGIC;
+      handoffUsbOtgToSerialJtag();
+      ESP.restart();
+    }
     powerManager.setPowerSaving(true);
     delay(50);
     return;
