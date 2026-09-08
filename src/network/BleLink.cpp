@@ -1168,6 +1168,44 @@ void BleLink::onControlWrite(const std::string& value) {
     return;
   }
 
+  if (op == "delete_book") {
+    // The offline shelf is a two-way mirror: a book removed in the app is
+    // removed here. Progress is not lost by doing so -- it lives in kosync, so
+    // re-saving the book restores the position with it.
+    //
+    // Destructive, so it is narrow by construction: one file, by name, under
+    // /Books, with the same name rule an upload has to satisfy (no separators,
+    // no traversal, .epub only). There is no recursive form and no wildcard.
+    const std::string name = doc["name"] | "";
+    if (!isSafeBleBookName(name)) {
+      setError("unsafe book filename");
+      return;
+    }
+    if (activityManager.isReaderActivity()) {
+      // Deleting the file underneath an open reader would leave it paging into
+      // a file that is gone. Refused rather than deferred, as a progress batch is.
+      setError("book open");
+      return;
+    }
+    const std::string path = std::string(BOOKS_ROOT) + "/" + name;
+    if (!Storage.exists(path.c_str())) {
+      // Already absent is the requested state, so this is a success: the app
+      // must not have to distinguish "I deleted it" from "it was not there".
+      LOG_INF("BLE", "delete_book: %s already absent", name.c_str());
+      setState(State::SAVED);
+      return;
+    }
+    if (!Storage.remove(path.c_str())) {
+      setError("could not delete the book");
+      return;
+    }
+    clearBookCache(path);
+    HomeShelfStore::markStale();
+    LOG_INF("BLE", "deleted %s", name.c_str());
+    setState(State::SAVED);
+    return;
+  }
+
   if (op == "start_put") {
     resetTransfer(true);
 

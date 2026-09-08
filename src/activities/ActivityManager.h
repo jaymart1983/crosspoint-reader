@@ -109,6 +109,10 @@ class ActivityManager {
   // home screen when home became a shelf.
   void goToMoreMenu();
   void goToSettings();
+  // The device's only remaining configuration screen. Every other setting is the
+  // app's now, read and written over BLE, so the Action Centre goes straight
+  // here rather than through a settings tree that duplicates it.
+  void goToBlePairing();
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();
 #if FREEINK_CAP_NETWORK

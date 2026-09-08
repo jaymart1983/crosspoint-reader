@@ -24,6 +24,7 @@
 #include "settings/SettingsActivity.h"
 #if FREEINK_CAP_BLE_TRANSFER
 #include "network/BleStoreActivity.h"
+#include "settings/BlePairingActivity.h"
 #endif
 #if FREEINK_CAP_NETWORK
 #include "OpdsServerStore.h"
@@ -316,6 +317,14 @@ void ActivityManager::goToFirmwareUpdate(std::string path, const bool stagedDrop
 void ActivityManager::goToMoreMenu() { replaceActivity(std::make_unique<MoreMenuActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
+
+#if FREEINK_CAP_BLE_TRANSFER
+void ActivityManager::goToBlePairing() {
+  replaceActivity(std::make_unique<BlePairingActivity>(renderer, mappedInput));
+}
+#else
+void ActivityManager::goToBlePairing() { goToSettings(); }
+#endif
 
 void ActivityManager::goToFileBrowser(std::string path) {
   replaceActivity(std::make_unique<FileBrowserActivity>(renderer, mappedInput, std::move(path)));

@@ -281,7 +281,11 @@ void FrontlightPanelActivity::runTile(const int id) {
       // leaving — otherwise Settings or Home draws in the reader's frame.
       ReaderUtils::applyUiOrientation(renderer);
       if (id == TILE_SETTINGS) {
-        activityManager.goToSettings();
+        // Bluetooth pairing IS the device's settings now. Everything else is
+        // read and written from the app over the link, so a settings tree here
+        // would be a second, staler copy of it -- and the one thing the app
+        // cannot do for you is pair in the first place.
+        activityManager.goToBlePairing();
       } else {
         activityManager.goHome();
       }

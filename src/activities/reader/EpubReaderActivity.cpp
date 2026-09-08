@@ -1149,7 +1149,20 @@ void EpubReaderActivity::renderBook() {
 
   const auto showBuildError = [this]() {
     renderer.clearScreen();
-    GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
+    // "Invalid book" is only one of the reasons a build fails, and it is the
+    // wrong one to name for the most common: the index streams each section to
+    // a temp file under /.crosspoint first, so a card with no room left fails
+    // EVERY book identically -- including ones that opened fine yesterday.
+    // Blaming the book there sends the user off deleting good books, which
+    // makes the actual problem worse.
+    const uint64_t freeBytes = Storage.freeBytes();
+    const bool cardFull = freeBytes != 0 && freeBytes < LOW_SPACE_BYTES;
+    GUI.drawPopup(renderer, cardFull ? tr(STR_CARD_FULL) : tr(STR_INDEX_FAILED));
+    if (cardFull) {
+      LOG_ERR("ERS", "build failed with only %llu bytes free", static_cast<unsigned long long>(freeBytes));
+    } else {
+      LOG_ERR("ERS", "build failed; %llu bytes free", static_cast<unsigned long long>(freeBytes));
+    }
     automaticPageTurnActive = false;
     // ...and then LEAVE. A book that cannot be indexed has no pages, so every
     // page-turn, menu and gesture in here has nothing to act on: the reader sat

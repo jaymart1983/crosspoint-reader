@@ -95,6 +95,16 @@ bool HalStorage::begin() {
 
 bool HalStorage::ready() const { return SDCard.ready(); }
 
+uint64_t HalStorage::totalBytes() const { return SDCard.sdTotalBytes(); }
+
+uint64_t HalStorage::usedBytes() { return SDCard.sdUsedBytes(); }
+
+uint64_t HalStorage::freeBytes() {
+  const uint64_t total = SDCard.sdTotalBytes();
+  const uint64_t used = SDCard.sdUsedBytes();
+  return used >= total ? 0 : total - used;
+}
+
 // For the rest of the methods, we acquire the mutex to ensure thread safety
 
 class HalStorage::StorageLock {

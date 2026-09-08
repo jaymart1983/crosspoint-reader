@@ -44,6 +44,10 @@ class EpubReaderActivity final : public ReaderActivity {
   // so the message is readable but the screen is not a dead end.
   unsigned long buildFailedExitAt = 0UL;
   static constexpr unsigned long BUILD_FAILED_DWELL_MS = 2500UL;
+  // Below this, a failed section build is far more likely to be the card than
+  // the book. A section's temp HTML is comfortably under a megabyte; 4 MB is
+  // slack enough that a real "invalid book" is not misreported as a full card.
+  static constexpr uint64_t LOW_SPACE_BYTES = 4ULL * 1024 * 1024;
   bool showBookmarkMessage = false;
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;

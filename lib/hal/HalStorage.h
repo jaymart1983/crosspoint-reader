@@ -24,6 +24,15 @@ class HalStorage {
   HalStorage();
   bool begin();
   bool ready() const;
+  // Card capacity and usage, in bytes; 0 when the card is not mounted or the
+  // figure cannot be determined. Used space is cached with a 20-second TTL by
+  // the layer below -- counting free clusters walks the FAT, so this is not
+  // something to call per frame.
+  uint64_t totalBytes() const;
+  uint64_t usedBytes();
+  // Bytes still available. Saturates at 0 rather than underflowing when the
+  // used figure is stale and briefly exceeds the total.
+  uint64_t freeBytes();
   // Stop the SD card for deep sleep: unmount, stop the SDMMC host, and release
   // the bus pads (no-op on SPI boards). Call only after all file users have
   // stopped; open HalFiles become invalid. A deep-sleep wake resets the MCU and
