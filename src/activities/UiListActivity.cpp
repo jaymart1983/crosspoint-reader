@@ -140,7 +140,10 @@ void UiListActivity::drawChrome() {
   const char* title = headerTitle();
   if (!title) return;
   const auto& metrics = UITheme::getInstance().getMetrics();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, title);
+  // Back lives in the title bar on every list screen -- Settings, More, and the
+  // menus reached from them -- rather than in a chip at the bottom of the page.
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight}, title,
+                 nullptr, /*withBack=*/true);
 }
 
 void UiListActivity::drawFooter() {

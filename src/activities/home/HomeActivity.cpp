@@ -24,6 +24,12 @@
 #include "util/BookLibraryIndex.h"
 
 namespace {
+// Where the book list begins: under the status strip and the title bar, with no
+// cover tile in between. One definition, because three call sites computing the
+// same top independently is how a list ends up drawn over its own header.
+static int libraryListTop(const ThemeMetrics& metrics) {
+  return metrics.topPadding + metrics.headerHeight + metrics.homeMenuTopOffset;
+}
 
 constexpr const char* BOOKS_ROOT = "/Books";
 
@@ -44,7 +50,7 @@ std::string cachedCoverFor(const std::string& path) {
 
 int HomeActivity::menuRowCapacity() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int bandTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int bandTop = libraryListTop(metrics);
   // Home draws no Back chip, so on touch boards the hint band's height belongs
   // to the menu (mirrors the reserve render() applies).
   const int bandBottom = renderer.getScreenHeight() - (mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight);
@@ -60,12 +66,14 @@ void HomeActivity::layoutShelf() {
   const int total = static_cast<int>(homeBooks.size());
   // A theme that puts the current book in the menu (RoundedRaff) shows exactly
   // one there, so the cover tile owns one book in that mode.
-  const int tileCapacity = metrics.homeContinueReadingInMenu ? 1 : std::max(1, metrics.homeRecentBooksCount);
-  coverCount = std::min(total, tileCapacity);
-
-  const int fixedRows = (metrics.homeContinueReadingInMenu ? coverCount : 0) + FIXED_MENU_ROWS;
-  const int room = menuRowCapacity() - fixedRows;
-  bookRowCount = std::clamp(total - coverCount, 0, std::max(0, room));
+  // Rows, not a cover tile. The Library is a list: one line per book, the one
+  // being read at the top with its percentage. A big cover for the first book
+  // spent a third of the screen on a single row and pushed everything else into
+  // a stub of a menu.
+  coverCount = 0;
+  const int room = menuRowCapacity();
+  rowsPerPage = std::max(1, room);
+  bookRowCount = std::clamp(total, 0, std::max(0, room));
 }
 
 int HomeActivity::renderedMenuRowCount() const {
@@ -145,6 +153,7 @@ void HomeActivity::reconcileShelf() {
     entry.readAt = book.readAt;
     entry.addedAt = book.addedAt;
     entry.inProgress = book.inProgress;
+    entry.percent = book.percent;
     cached.push_back(std::move(entry));
   }
   HOME_SHELF.replace(std::move(cached), fp.books, fp.hash);
@@ -220,7 +229,10 @@ void HomeActivity::onEnter() {
 
   switch (initialMenuItem) {
     case HomeMenuItem::STORE:
-      selectorIndex = coverCount + bookRowCount + (HAS_STORE ? 0 : 1);
+      // Without a Store row there is nothing at that index: the menu is
+      // books + More, so the last valid index is coverCount + bookRowCount.
+      // The old expression walked one PAST the end when HAS_STORE went false.
+      selectorIndex = coverCount + bookRowCount;
       break;
     // Everything that used to be its own home row now lives one level down, so
     // coming back from any of them lands on the row that opens them.
@@ -350,7 +362,7 @@ void HomeActivity::loop() {
     return;
   }
 
-  const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int menuTop = libraryListTop(metrics);
   int menuRow = -1;
   // Row height from the theme, not the metrics table: RoundedRaff draws
   // font-derived rows and the touch grid must match the visuals exactly.
@@ -395,6 +407,22 @@ void HomeActivity::renderEmptyShelf(const Rect tile) const {
   }
 }
 
+int HomeActivity::pageCount() const {
+  const int rows = std::max(1, bookRowCount);
+  const int listed = std::max(0, static_cast<int>(homeBooks.size()) - coverCount);
+  return std::max(1, (listed + rows - 1) / rows);
+}
+
+void HomeActivity::goToPage(const int index) {
+  const int clamped = std::clamp(index, 0, pageCount() - 1);
+  if (clamped == pageIndex) return;
+  pageIndex = clamped;
+  // The selector belongs to the page, not to the shelf: landing on a row the
+  // user cannot see would make the next button press jump somewhere unrelated.
+  selectorIndex = coverCount;
+  requestUpdate();
+}
+
 void HomeActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
@@ -406,8 +434,14 @@ void HomeActivity::render(RenderLock&&) {
   // Band spans topPadding..homeTopPadding: the cover tile starts at the fixed
   // homeTopPadding, so the height must shrink by topPadding or the band (and a
   // centered title, e.g. RoundedRaff's book title) sinks into the tile.
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding - metrics.topPadding},
-                 metrics.homeContinueReadingInMenu && !homeBooks.empty() ? homeBooks[0].title.c_str() : nullptr);
+  // The page has a name now. This screen is the device's library -- the shelf
+  // that mirrors what the phone saved offline -- and an untitled band read as
+  // chrome rather than as a place.
+  // The FULL header height, not the shortened home band. This header is two
+  // rows -- the status strip (time, USB, BLE, battery) above, the page title
+  // below -- and squeezing both into homeTopPadding left the status row with
+  // nowhere to draw, which read as "the top bar is missing".
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, tr(STR_LIBRARY));
 
   // Record the tile rect so storeCoverBuffer (called from the theme) knows
   // which sub-region of the framebuffer to snapshot. ~16 KB in Portrait
@@ -436,37 +470,91 @@ void HomeActivity::render(RenderLock&&) {
       menuIcons.push_back(Book);
     }
   }
+  const int firstRow = coverCount + pageIndex * std::max(1, bookRowCount);
   for (int i = 0; i < bookRowCount; i++) {
-    menuItems.push_back(homeBooks[coverCount + i].title);
+    const int idx = firstRow + i;
+    if (idx >= static_cast<int>(homeBooks.size())) break;
+    // homeBooks holds RecentBook, which has no progress; the percentage lives on
+    // the shelf entry the same walk produced. Matched by path rather than by
+    // index because the two lists are built separately.
+    const auto& book = homeBooks[idx];
+    float percent = 0.0f;
+    for (const auto& shelfBook : HOME_SHELF.getBooks()) {
+      if (shelfBook.path == book.path) {
+        percent = shelfBook.inProgress ? shelfBook.percent : 0.0f;
+        break;
+      }
+    }
+    if (percent > 0.0f) {
+      char label[160];
+      snprintf(label, sizeof(label), "%s  %d%%", book.title.c_str(), static_cast<int>(percent * 100.0f + 0.5f));
+      menuItems.emplace_back(label);
+    } else {
+      menuItems.push_back(book.title);
+    }
     menuIcons.push_back(Book);
   }
-  if (HAS_STORE) {
-    menuItems.emplace_back(tr(STR_STORE));
-    menuIcons.push_back(Library);
-  }
-  menuItems.emplace_back(tr(STR_MORE));
-  menuIcons.push_back(Settings);
 
   // Home is the navigation root, so it draws no Back chip and gives the hint
   // band's height back to the menu on touch boards.
   const int menuBottomReserve = mappedInput.hasTouch() ? 0 : metrics.buttonHintsHeight;
   GUI.drawButtonMenu(
       renderer,
-      Rect{0, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, pageWidth,
+      Rect{0, libraryListTop(metrics), pageWidth,
            pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
                          metrics.homeMenuTopOffset + menuBottomReserve)},
       static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - coverCount,
       [&menuItems](int index) { return menuItems[index]; }, [&menuIcons](int index) { return menuIcons[index]; });
 
-  const auto labels = mappedInput.mapLabels(homeBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP),
-                                            tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, /*touchBack=*/false);
+  // The pager, full width, across the bottom. Always drawn -- greyed rather than
+  // hidden -- so the bar does not appear and disappear as the shelf grows past
+  // one screen, which would move every row under the user's finger.
+  {
+    const int band = metrics.buttonHintsHeight;
+    const int barY = pageHeight - band;
+    const int half = pageWidth / 2;
+    const int pages = pageCount();
+    const bool canUp = pageIndex > 0;
+    const bool canDown = pageIndex + 1 < pages;
+    renderer.drawLine(0, barY, pageWidth, barY, true);
+    pagerBarY = barY;
+    pagerBarHeight = band;
+    pagerSplitX = half;
+    const Rect pageUpRect{0, barY, half, band};
+    const Rect pageDownRect{half, barY, pageWidth - half, band};
+    renderer.drawLine(half, barY + 4, half, barY + band - 4, true);
+
+    // Greyed is drawn as a lighter glyph rather than omitted: an arrow that is
+    // there but inert says "this is the first page"; a missing one says nothing.
+    const auto arrow = [&](const Rect& r, const bool up, const bool enabled) {
+      const int cx = r.x + r.width / 2;
+      const int cy = r.y + r.height / 2;
+      const int w = 10;
+      const int h = 6;
+      const int tipY = up ? cy - h : cy + h;
+      const int baseY = up ? cy + h : cy - h;
+      renderer.drawLine(cx - w, baseY, cx, tipY, true);
+      renderer.drawLine(cx + w, baseY, cx, tipY, true);
+      if (!enabled) {
+        // Struck through: the panel has no grey, so "disabled" has to be a shape.
+        renderer.drawLine(cx - w - 2, cy + h + 2, cx + w + 2, cy - h - 2, true);
+      }
+    };
+    arrow(pageUpRect, /*up=*/true, canUp);
+    arrow(pageDownRect, /*up=*/false, canDown);
+  }
 
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 
   if (!firstRenderDone) {
     firstRenderDone = true;
+    requestUpdate();
+  } else if (HomeShelfStore::consumeStale()) {
+    // Something landed on the card from outside this screen. Re-walk and repaint
+    // so a book pushed from the phone appears where it belongs, at the top.
+    shelfChecked = false;
+    reconcileShelf();
     requestUpdate();
   } else if (!shelfChecked) {
     // Behind the first useful paint, never in front of it.

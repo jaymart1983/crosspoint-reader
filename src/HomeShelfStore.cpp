@@ -9,6 +9,8 @@
 #include "activities/reader/ProgressFile.h"
 #include "util/BookProgressSync.h"
 
+std::atomic<bool> HomeShelfStore::shelfStale{false};
+
 void HomeShelfStore::toJson(JsonDocument& doc) const {
   doc["fpBooks"] = fingerprintBooks;
   doc["fpHash"] = fingerprintHash;
@@ -21,6 +23,7 @@ void HomeShelfStore::toJson(JsonDocument& doc) const {
     obj["readAt"] = book.readAt;
     obj["addedAt"] = book.addedAt;
     obj["inProgress"] = book.inProgress;
+    obj["percent"] = book.percent;
   }
 }
 
@@ -42,6 +45,7 @@ bool HomeShelfStore::fromJson(JsonVariantConst doc) {
     book.readAt = obj["readAt"] | 0u;
     book.addedAt = obj["addedAt"] | 0u;
     book.inProgress = obj["inProgress"] | false;
+    book.percent = obj["percent"] | 0.0f;
     if (book.title.empty()) {
       // Never draw a blank row: the filename is always something to show.
       const size_t slash = book.path.find_last_of('/');

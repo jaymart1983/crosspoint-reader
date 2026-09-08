@@ -477,6 +477,7 @@ STR_BLE_PAIR_HINT: "Enter this code in the app"
 STR_BLE_PAIRED_WITH: "Paired with"
 STR_BLE_NOT_CONNECTED: "Not connected"
 
+STR_LIBRARY: "Library"
 STR_STORE: "Store"
 STR_MORE: "More"
 STR_HOME_NO_BOOKS: "No books yet"

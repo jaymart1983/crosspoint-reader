@@ -251,8 +251,17 @@ class BaseTheme {
   // grid from this, so hit bands always match the visuals (RoundedRaff derives
   // its row height from the font, not the metrics table).
   virtual int getMenuRowHeight(const GfxRenderer& renderer) const;
+  /// \p withBack draws "< Back |" at the left of the title and registers the
+  /// touch target there, instead of the chip in the bottom band. The bottom chip
+  /// is suppressed for the rest of the frame -- drawHeader always runs before
+  /// drawButtonHints -- so a screen never shows two of them.
   virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,
-                          const char* subtitle = nullptr) const;
+                          const char* subtitle = nullptr, bool withBack = false) const;
+  /// True when this frame's header already drew Back. Reset by every drawHeader,
+  /// so it describes this frame and not the last one.
+  static bool backDrawnInHeader();
+  /// The label used for Back in a title bar.
+  static const char* backHeaderLabel();
   virtual void drawSubHeader(const GfxRenderer& renderer, Rect rect, const char* label,
                              const char* rightLabel = nullptr) const;
   virtual void drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,

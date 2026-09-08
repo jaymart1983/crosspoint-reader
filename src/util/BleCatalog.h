@@ -78,6 +78,10 @@ constexpr size_t MAX_THUMB_BYTES = 8192;
 constexpr size_t MAX_CONTAINER_BYTES = 64UL * 1024UL;
 
 constexpr size_t MAX_ID_BYTES = 64;
+// Clamped on arrival like every other string: the app is not trusted to have
+// applied its own limits.
+constexpr size_t MAX_META_BYTES = 64;
+constexpr size_t MAX_TAGS_BYTES = 96;
 constexpr size_t MAX_TITLE_BYTES = 160;
 constexpr size_t MAX_AUTHOR_BYTES = 128;
 constexpr size_t MAX_FILENAME_BYTES = 96;
@@ -98,6 +102,16 @@ struct Entry {
   bool onDevice = false;
   // Where the extracted cover landed, or empty when this entry had none.
   std::string thumbPath;
+  // --- detail-only metadata --------------------------------------------------
+  // Sent only for a catalog_detail; a page row shows none of it and pays nothing
+  // for it. Every field is optional -- an app that does not send one leaves it
+  // empty, which is also what an older app produces, so the reader renders what
+  // it is given rather than requiring any of it.
+  std::string series;     ///< "Foundation #2", already formatted by the app
+  std::string publisher;
+  std::string published;  ///< year
+  std::string language;
+  std::string tags;       ///< comma-joined
 };
 
 struct Page {

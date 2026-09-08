@@ -290,6 +290,12 @@ class BleLink {
   // object parses as a status and reports as an unreadable one.
   // The READ value, shed until it fits the 512-byte ATT attribute ceiling.
   // Never returns a document that would be served truncated.
+  // Last authentication state the header was repainted for. The indicator is
+  // drawn by every screen's header, but only ONE screen at a time can be a
+  // link Observer -- so a screen that is not the observer (the home screen,
+  // normally) never learns the link came up, and shows no BLE until something
+  // else happens to redraw it.
+  bool lastPublishedAuth_ = false;
   std::string buildReadJson() const;
   std::string buildNotifyJson(size_t capBytes) const;
 };

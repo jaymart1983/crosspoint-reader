@@ -331,6 +331,14 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  // A book that would not index: hold the message long enough to read, then go
+  // back to the library rather than trapping the user in a reader with no pages.
+  if (buildFailedExitAt != 0 && millis() - buildFailedExitAt >= BUILD_FAILED_DWELL_MS) {
+    buildFailedExitAt = 0;
+    finish();
+    return;
+  }
+
   // Someone else turned the screen while this reader was stacked (the control
   // center's orientation tile). Reflow before the next render, or the page
   // would be drawn with a layout built for the previous frame size.
@@ -1143,6 +1151,11 @@ void EpubReaderActivity::renderBook() {
     renderer.clearScreen();
     GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
     automaticPageTurnActive = false;
+    // ...and then LEAVE. A book that cannot be indexed has no pages, so every
+    // page-turn, menu and gesture in here has nothing to act on: the reader sat
+    // on the message with no way out but the reset pin. The library is a screen
+    // the user can act from, and the message is still on screen on the way out.
+    buildFailedExitAt = millis();
   };
 
   if (currentSpineIndex < 0) currentSpineIndex = 0;

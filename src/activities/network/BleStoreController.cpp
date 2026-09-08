@@ -62,6 +62,9 @@ constexpr int LIST_SIDE_PADDING = 12;
 BleStoreController::BleStoreController(GfxRenderer& renderer, MappedInputManager& mappedInput, Host& host)
     : renderer(renderer), mappedInput(mappedInput), host(host) {}
 
+// Survives every Store screen for the life of the boot; see the declaration.
+uint32_t BleStoreController::nextReq_ = 1;
+
 void BleStoreController::begin() {
   Storage.ensureDirectoryExists(STORE_ROOT);
   BleCatalog::clearThumbnails(PAGE_THUMB_DIR);
@@ -581,6 +584,50 @@ void BleStoreController::renderDetail() const {
                                   .c_str());
     y += renderer.getLineHeight(SMALL_FONT_ID) + metrics.verticalSpacing;
   }
+
+  // Series, then a facts line. Both are optional and each costs a line only when
+  // the app actually sent something, so a book with no metadata renders exactly
+  // as it did before and the blurb keeps the space.
+  if (!entry.series.empty()) {
+    renderer.drawCenteredText(SMALL_FONT_ID, y,
+                              renderer.truncatedText(SMALL_FONT_ID, entry.series.c_str(),
+                                                     pageWidth - metrics.contentSidePadding * 2)
+                                  .c_str());
+    y += renderer.getLineHeight(SMALL_FONT_ID);
+  }
+  {
+    // One line, separated by middle dots: publisher, year, language, format and
+    // size are each short, and five stacked lines would eat the blurb entirely.
+    std::string facts;
+    const auto add = [&facts](const std::string& value) {
+      if (value.empty()) return;
+      if (!facts.empty()) facts += " · ";
+      facts += value;
+    };
+    add(entry.publisher);
+    add(entry.published);
+    add(entry.language);
+    add(entry.format);
+    if (entry.size > 0) {
+      const uint32_t kb = (entry.size + 1023) / 1024;
+      add(kb >= 1024 ? std::to_string(kb / 1024) + " MB" : std::to_string(kb) + " KB");
+    }
+    if (!facts.empty()) {
+      renderer.drawCenteredText(SMALL_FONT_ID, y,
+                                renderer.truncatedText(SMALL_FONT_ID, facts.c_str(),
+                                                       pageWidth - metrics.contentSidePadding * 2)
+                                    .c_str());
+      y += renderer.getLineHeight(SMALL_FONT_ID);
+    }
+  }
+  if (!entry.tags.empty()) {
+    renderer.drawCenteredText(SMALL_FONT_ID, y,
+                              renderer.truncatedText(SMALL_FONT_ID, entry.tags.c_str(),
+                                                     pageWidth - metrics.contentSidePadding * 2)
+                                  .c_str());
+    y += renderer.getLineHeight(SMALL_FONT_ID);
+  }
+  y += metrics.verticalSpacing;
 
   // The action line, then whatever height is left goes to the blurb.
   const int actionY = renderer.getScreenHeight() - metrics.buttonHintsHeight - lineHeight - 8;

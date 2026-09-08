@@ -66,12 +66,31 @@ class HomeActivity final : public Activity {
   // BLE and nothing else -- there is no WiFi on this board -- so on a build
   // without the BLE transfer service the row is not built at all rather than
   // offered and refused.
-#if FREEINK_CAP_BLE_TRANSFER
-  static constexpr bool HAS_STORE = true;
-#else
-  static constexpr bool HAS_STORE = false;
-#endif
-  static constexpr int FIXED_MENU_ROWS = HAS_STORE ? 2 : 1;  // Store, More
+// Retired. Browsing and searching a Calibre library belongs in the phone app,
+// which has a keyboard, a screen that scrolls and the whole catalogue; the
+// reader shows the finite set that was actually saved offline and pushed to it.
+// The shelf below already IS that library, in the order this device wants:
+// currently reading first, then newest arrival (see BookLibraryIndex::shelfLess).
+//
+// BleStoreActivity is left in the tree but unreachable, like UsbDriveActivity.
+static constexpr bool HAS_STORE = false;
+// Nothing but books. Settings and Home both live in the Action Centre, and the
+// browsing screens More used to hold are what this list now is, so a menu row
+// underneath the shelf would be a third route to somewhere already reachable.
+static constexpr int FIXED_MENU_ROWS = 0;
+// Filled in by render() from the height actually available, so a theme with
+// taller rows simply pages sooner.
+mutable int rowsPerPage = 1;
+  // Which screenful of the shelf is showing. The shelf itself is ordered once
+  // (currently reading, then newest arrival); paging never reorders it.
+  int pageIndex = 0;
+  // Plain ints: Rect is not complete in this header, and the pager only needs
+  // the band's geometry to hit-test against.
+  mutable int pagerBarY = 0;
+  mutable int pagerBarHeight = 0;
+  mutable int pagerSplitX = 0;
+  int pageCount() const;
+  void goToPage(int index);
 
   void onSelectBook(const std::string& path);
   void onStoreOpen();

@@ -164,7 +164,19 @@ class BleStoreController {
 
   PendingOp pending_ = PendingOp::NONE;
   uint32_t pendingReq_ = 0;
-  uint32_t nextReq_ = 1;
+  // Monotonic for the life of the boot, NOT per screen.
+  //
+  // A controller is constructed every time the Store opens, so a per-instance
+  // counter restarted at 1 each session. The app remembers answered ids so it
+  // can ignore the re-notifications this class sends while it waits -- and with
+  // ids that restart, every session after the first looked to it like a request
+  // it had already answered. It ignored them, this class re-notified until it
+  // gave up, and the screen sat on "Asking your phone" with no error at either
+  // end to explain it.
+  //
+  // An id is a name for a question asked over a link that outlives any screen,
+  // so it has to be unique over that link, not over the screen that asked.
+  static uint32_t nextReq_;
   uint32_t pendingOffset_ = 0;
   std::string pendingId_;
   unsigned long pendingIssuedAt_ = 0;

@@ -935,15 +935,30 @@ void loop() {
   // and that device is almost always one being flashed.
   static bool sawUsbUnplugged = false;
   static bool usbDriveActive = false;
+  static bool usbDriveHostSeen = false;
+  static unsigned long usbDriveStartedAt = 0;
+  // Matches the old UsbDriveActivity::AUTO_HOST_WAIT_TIMEOUT_MS. Long enough for
+  // a real host to enumerate and mount, short enough that a charger cannot
+  // strand the device.
+  constexpr unsigned long USB_DRIVE_HOST_WAIT_MS = 20UL * 1000UL;
   if (!gpio.isUsbConnected()) sawUsbUnplugged = true;
 
   if (usbDriveActive) {
     // No activity loop, no repaint, no storage call except the state poll: the
     // card belongs to the host until it says otherwise.
     const UsbDriveState driveState = Storage.usbDriveState();
+    if (driveState == UsbDriveState::Connected) usbDriveHostSeen = true;
+    // A wall charger and a charge-only cable both raise a plug edge, and neither
+    // will ever enumerate. Without this the device sits with the card detached,
+    // drawing nothing and answering nothing, until the reset pin -- which is
+    // indistinguishable from a freeze, and was reported as one. The screen this
+    // replaced had exactly this timeout on its automatic path; dropping it was a
+    // regression, not a simplification.
+    const bool hostNeverCame = !usbDriveHostSeen && millis() - usbDriveStartedAt >= USB_DRIVE_HOST_WAIT_MS;
     const bool hostFinished = driveState == UsbDriveState::Ejected || driveState == UsbDriveState::Disconnected ||
                               driveState == UsbDriveState::IoError;
-    if (hostFinished || !gpio.isUsbConnected()) {
+    if (hostFinished || hostNeverCame || !gpio.isUsbConnected()) {
+      if (hostNeverCame) LOG_INF("USB", "no host in %lu ms; taking the card back", USB_DRIVE_HOST_WAIT_MS);
       LOG_INF("USB", "host released the card; rebooting to the serial personality");
       Storage.endUsbDrive();
       Storage.setUsbDriveHandoffPending(false);
@@ -969,10 +984,32 @@ void loop() {
     // paint to finish. Every render after this point would be a read against a
     // detached filesystem.
     activityManager.requestUpdateAndWait();
+    // Stop the radio before the card leaves. This protection existed in
+    // UsbDriveActivity and was lost when that screen was removed: its only
+    // caller went with it, so the end() inside it is now dead code while this
+    // path -- the only one that hands the card over -- had none.
+    //
+    // The main loop's early return does stop BleLink::tick(), but that only
+    // silences the pump; the NimBLE host task stays up, still advertising and
+    // still able to take a connection against a filesystem that no longer
+    // exists. The OTA path stops it for the same reason.
+    //
+    // No matching begin(): every exit from here reboots, and setup() starts it.
+#if FREEINK_CAP_BLE_TRANSFER
+    BLE_LINK.end();
+#endif
     if (Storage.beginUsbDrive()) {
       usbDriveActive = true;
+      usbDriveHostSeen = false;
+      usbDriveStartedAt = millis();
     } else {
       LOG_ERR("USB", "could not hand the card to the host; carrying on normally");
+      // The card was remounted by beginUsbDrive()'s own failure path and this
+      // screenless route does not reboot, so the radio has to come back or the
+      // device is silently unreachable until the next power cycle.
+#if FREEINK_CAP_BLE_TRANSFER
+      BLE_LINK.begin();
+#endif
       Storage.setUsbDriveHandoffPending(false);
       activityManager.requestUpdate();
     }

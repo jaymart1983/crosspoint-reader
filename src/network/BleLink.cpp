@@ -26,6 +26,8 @@
 
 #include "BleTrustedHostStore.h"
 #include "CrossPointSettings.h"
+#include "HomeShelfStore.h"
+#include "components/UITheme.h"
 #include "FirmwareFlasher.h"
 #include "FirmwareStaging.h"
 #include "activities/Activity.h"  // pulls ActivityManager.h with Activity complete
@@ -498,8 +500,31 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
   explicit ServerCallbacks(BleLink& link) : link_(link) {}
 
   void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
-    server->updateConnParams(connInfo.getConnHandle(), 6, 12, 0, 120);
+    // 7.5-15 ms interval, no slave latency, 4 s supervision timeout.
+    //
+    // The timeout was 1.2 s (120 units). That is legal but tight: it is the
+    // window in which the link layer's own heartbeat -- a packet every
+    // connection interval, empty if there is nothing to say -- must succeed at
+    // least once, and phones deprioritise BLE scheduling routinely for Wi-Fi
+    // coexistence and doze. A gap that costs nothing at 4 s dropped the link at
+    // 1.2 s, and a dropped link is what the app then has to notice, reconnect
+    // and re-authenticate through.
+    //
+    // Latency stays 0: the peripheral answers every event, which is what keeps
+    // a notification prompt and a transfer fast. The cost is the modem floor
+    // while awake, which is already the price of the radio being always on.
+    server->updateConnParams(connInfo.getConnHandle(), 6, 12, 0, 400);
     server->setDataLen(connInfo.getConnHandle(), 251);
+    // BLE 5.0 2M PHY: double the symbol rate, which is the only throughput lever
+    // left on this link. The interval is already at the 7.5 ms spec minimum and
+    // the PDU is already the 251-byte maximum, so everything else is spent.
+    //
+    // Both masks are offered rather than 2M alone: a peer that cannot do 2M then
+    // negotiates 1M instead of failing the procedure. Nothing depends on the
+    // outcome -- it is a speed optimisation, and a phone that stays on 1M simply
+    // transfers at the old rate. onPhyUpdate logs what was actually agreed.
+    server->updatePhy(connInfo.getConnHandle(), BLE_GAP_LE_PHY_1M_MASK | BLE_GAP_LE_PHY_2M_MASK,
+                      BLE_GAP_LE_PHY_1M_MASK | BLE_GAP_LE_PHY_2M_MASK, 0);
     // Still the 23-byte default at this point on most stacks; onMTUChange
     // corrects it a moment later. Recorded either way so a peer that never
     // exchanges is sized for honestly rather than optimistically.
@@ -508,6 +533,14 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
   }
 
   void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override { link_.noteBleMtu(mtu); }
+
+  void onPhyUpdate(NimBLEConnInfo&, const uint8_t txPhy, const uint8_t rxPhy) override {
+    // Logged because it is otherwise invisible: a transfer that runs at half the
+    // expected rate looks like a slow phone rather than a link that quietly
+    // stayed on 1M.
+    LOG_INF("BLE", "PHY now tx=%s rx=%s", txPhy == BLE_GAP_LE_PHY_2M ? "2M" : "1M",
+            rxPhy == BLE_GAP_LE_PHY_2M ? "2M" : "1M");
+  }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     link_.noteBleMtu(0);
@@ -1109,6 +1142,20 @@ void BleLink::onControlWrite(const std::string& value) {
       setError("invalid epoch");
       return;
     }
+    // The offset comes with the instant, or the clock is right and the CLOCK IS
+    // WRONG: the device was showing UTC while the user was six hours west of it,
+    // which reads as a six-hour error rather than as a missing time zone.
+    // Quarter-hours, biased by 48, matching CrossPointSettings::clockUtcOffsetQ
+    // (48 = UTC+0) -- quarters because not every zone is a whole hour.
+    if (doc["utc_offset_q"].is<int>()) {
+      const int offsetQ = doc["utc_offset_q"].as<int>();
+      if (offsetQ >= 0 && offsetQ <= 96) {
+        SETTINGS.clockUtcOffsetQ = static_cast<uint8_t>(offsetQ);
+        SETTINGS.saveToFile();
+      } else {
+        LOG_ERR("BLE", "ignoring out-of-range utc_offset_q %d", offsetQ);
+      }
+    }
     if (!halClock.setEpoch(static_cast<uint32_t>(epoch))) {
       setError("could not set clock");
       return;
@@ -1541,7 +1588,12 @@ void BleLink::processCommit() {
 
   if (transferKind_ == TransferKind::BOOK || transferKind_ == TransferKind::BMP) {
     savedPath_ = finalPath_;
-    if (transferKind_ == TransferKind::BOOK) clearBookCache(savedPath_);
+    if (transferKind_ == TransferKind::BOOK) {
+      clearBookCache(savedPath_);
+      // The Library reconciles once per visit, so a book that lands while the
+      // shelf is on screen would otherwise not appear until a restart.
+      HomeShelfStore::markStale();
+    }
     if (store_ && transferKind_ == TransferKind::BOOK) {
       storeExpectedBook_.clear();
       store_->onFetchSaved(savedPath_);
@@ -1741,6 +1793,19 @@ bool BleLink::applySettingsDocument() {
     setError("could not persist settings");
     return false;
   }
+
+  // Persisting is not applying. Most settings are read live at draw time, but
+  // the theme and the metrics derived from it are built once and cached, so a
+  // document that changes uiTheme did nothing visible until the next boot --
+  // which is exactly what a settings screen written over BLE looked like from
+  // the outside: "it saved, but nothing happened".
+  //
+  // This is the same pair of steps SettingsActivity performs when the user
+  // changes a value on the device itself (reload the theme, then repaint); the
+  // BLE path simply never did them.
+  UITheme::getInstance().reload();
+  activityManager.requestUpdate();
+  LOG_INF("BLE", "settings applied and re-rendered");
   return true;
 }
 
@@ -2041,6 +2106,16 @@ void BleLink::publishStatus() {
   statusDirty_ = false;
   if (!ble_) return;
   ble_->publish(buildReadJson(), buildNotifyJson(notifyCapBytes()));
+
+  // Repaint whatever is on screen when the BLE indicator would change. Every
+  // header draws that indicator, but observers are single-slot and the Store or
+  // the pairing page usually holds it, so most screens never hear about the
+  // link at all. Not while a book is open: a page of text is the one place a
+  // repaint costs the user something, and the indicator is not worth it.
+  if (helloAccepted_ != lastPublishedAuth_) {
+    lastPublishedAuth_ = helloAccepted_;
+    if (!activityManager.isReaderActivity()) activityManager.requestUpdate();
+  }
 }
 
 std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned detail) const {
@@ -2064,7 +2139,15 @@ std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned det
   const bool wantSession = full || detail >= 5;   // session-constant capability facts
   const bool wantIdentity = full || detail >= 4;  // who this device is, and to whom
   const bool wantProgress = full || detail >= 2;  // byte counters and the error text
-  const bool wantPending = full || detail >= 1;   // the store's request channel
+  // NEVER shed. The reader is a peripheral and cannot call out, so a notification
+  // carrying `pending` is the ONLY way it can ask the phone anything. Shedding it
+  // to make the document fit produces a doorbell with no question behind it: the
+  // reader waits out its whole budget and reports that the app did not answer,
+  // while the app was never told there was anything to answer. That is the same
+  // class of silent loss as the request ids that restarted per screen.
+  //
+  // Everything else in a notification is re-readable; this is not.
+  const bool wantPending = true;  // the store's request channel
   // Only below level 3 does the request shed the geometry and the deadline the
   // app builds its answer from; a GATT read still has them.
   const bool pendingTerse = !full && detail < 3;

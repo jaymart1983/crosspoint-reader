@@ -111,6 +111,12 @@ bool readEntry(JsonObjectConst obj, const size_t descriptionCap, const char* boo
   entry.description = clampUtf8(obj["description"] | "", descriptionCap);
   entry.format = clampUtf8(obj["format"] | "", 16);
   entry.size = obj["size"] | 0u;
+  // Optional throughout: absent means "not supplied", never an error.
+  entry.series = clampUtf8(obj["series"] | "", BleCatalog::MAX_META_BYTES);
+  entry.publisher = clampUtf8(obj["publisher"] | "", BleCatalog::MAX_META_BYTES);
+  entry.published = clampUtf8(obj["published"] | "", 16);
+  entry.language = clampUtf8(obj["language"] | "", 16);
+  entry.tags = clampUtf8(obj["tags"] | "", BleCatalog::MAX_TAGS_BYTES);
 
   const std::string filename = obj["filename"] | "";
   // An entry with no usable filename is still listed -- the user can read about

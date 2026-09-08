@@ -40,6 +40,10 @@ class EpubReaderActivity final : public ReaderActivity {
   static constexpr uint8_t MAX_PAGE_LOAD_RETRIES = 3;
   bool skipNextButtonCheck = false;
   bool automaticPageTurnActive = false;
+  // Non-zero once a book has failed to index: the reader leaves shortly after,
+  // so the message is readable but the screen is not a dead end.
+  unsigned long buildFailedExitAt = 0UL;
+  static constexpr unsigned long BUILD_FAILED_DWELL_MS = 2500UL;
   bool showBookmarkMessage = false;
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;

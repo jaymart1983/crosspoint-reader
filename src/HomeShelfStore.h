@@ -1,4 +1,6 @@
 #pragma once
+
+#include <atomic>
 #include <ArduinoJson.h>
 #include <PersistableStore.h>
 
@@ -31,10 +33,15 @@ struct HomeShelfBook {
   // never been opened, which are ordered by it.
   uint32_t addedAt = 0;
   bool inProgress = false;
+  // 0..1, from the same walk that set inProgress. Carried so the Library can
+  // show how far in a book is without reopening it; 0 means "not known", which
+  // is also what a .txt with a saved position but no recoverable percentage has.
+  float percent = 0.0f;
 };
 
 class HomeShelfStore : public PersistableStore<HomeShelfStore> {
  private:
+  static std::atomic<bool> shelfStale;
   std::vector<HomeShelfBook> books;
   // BookLibraryIndex::Fingerprint of the shelf these entries were built from.
   uint32_t fingerprintBooks = 0;
@@ -51,7 +58,20 @@ class HomeShelfStore : public PersistableStore<HomeShelfStore> {
   // HomeActivity::bookRowCapacity), and the cover strip takes the first few.
   // Twelve leaves headroom for the tallest theme without turning the cache into
   // a second library index.
-  static constexpr size_t MAX_SHELF_BOOKS = 12;
+  // The Library pages through this, so it is the size of the whole shelf the
+  // device shows rather than one screenful. Each entry is a few short strings;
+  // 40 is a handful of KB against 8 MB of PSRAM.
+  static constexpr size_t MAX_SHELF_BOOKS = 40;
+
+  // Set when something outside the Library changes what is on the card -- a book
+  // arriving over BLE, today. The Library reconciles once per visit, so without
+  // this a book pushed from the phone while the shelf was on screen did not
+  // appear until the device was restarted, which read as "the transfer failed".
+  //
+  // Atomic because the writer is the BLE event pump and the reader is the
+  // render loop.
+  static void markStale() { shelfStale.store(true, std::memory_order_relaxed); }
+  static bool consumeStale() { return shelfStale.exchange(false, std::memory_order_relaxed); }
 
   static const char* getFilePath() { return "/.crosspoint/home-shelf.json"; }
   void toJson(JsonDocument& doc) const;

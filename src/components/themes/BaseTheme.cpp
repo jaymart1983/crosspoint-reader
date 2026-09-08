@@ -27,6 +27,11 @@
 
 // Internal constants
 namespace {
+// Whether this frame's header drew Back. drawTouchBackButton reads it to decide
+// whether the bottom chip is still needed; every drawHeader writes it, so it can
+// never describe a previous frame.
+std::atomic<bool> gBackInHeader{false};
+constexpr int kHeaderBackGap = 8;
 constexpr int homeMenuMargin = 20;
 constexpr int homeMarginTop = 30;
 constexpr int subtitleY = 738;
@@ -220,7 +225,22 @@ Rect clampToScreen(const GfxRenderer& renderer, const Rect r) {
 }
 }  // namespace
 
+bool BaseTheme::backDrawnInHeader() { return gBackInHeader.load(std::memory_order_relaxed); }
+
+const char* BaseTheme::backHeaderLabel() { return I18N.get(StrId::STR_BACK); }
+
 Rect BaseTheme::touchBackButtonRect(const GfxRenderer& renderer) {
+  if (gBackInHeader.load(std::memory_order_relaxed)) {
+    // The whole header band on the left, not just the text line: a touch target
+    // the height of one line of small text is too small to hit reliably, and
+    // nothing else is drawn in that column.
+    const auto& metrics = UITheme::getInstance().getMetrics();
+    return clampToScreen(
+        renderer, Rect{0, static_cast<int>(metrics.topPadding),
+                       metrics.contentSidePadding + renderer.getTextWidth(UI_10_FONT_ID, backHeaderLabel()) +
+                           kHeaderBackGap,
+                       static_cast<int>(metrics.headerHeight)});
+  }
   // The band the active theme reserves at the bottom of every screen (see
   // UITheme::getMetrics), so the chip always lands inside reserved space.
   const int band = UITheme::getInstance().getMetrics().buttonHintsHeight;
@@ -246,6 +266,9 @@ void BaseTheme::setTouchBackButtonVisible(const bool visible) {
 }
 
 void BaseTheme::drawTouchBackButton(const GfxRenderer& renderer) {
+  // Already drawn in the title bar this frame: drawing it again would put two
+  // Back controls on one screen, and the hit rect can only describe one of them.
+  if (gBackInHeader.load(std::memory_order_relaxed)) return;
   const Rect rect = touchBackButtonRect(renderer);
   // White fill first: the chip floats over whatever the screen drew underneath
   // and must stay legible on a busy list.
@@ -385,7 +408,9 @@ void BaseTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* top
   }
 }
 
-void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle) const {
+void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
+                           const bool withBack) const {
+  gBackInHeader.store(withBack, std::memory_order_relaxed);
   // Every activity header renders through the FreeInkUI header + battery
   // indicator components, styled by the active theme's tokens (padding,
   // centering, underline). Non-interactive frame: no hit rects registered.
@@ -480,6 +505,10 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
   props.borderEdges = fui::EdgeBottom;
   props.titleText = tokens.titleText;
   props.titleText.align = tokens.headerTitleAlign;
+  // A centred title ignores leftReserve, so with Back in the band the two land
+  // on top of each other and read as one control. Left-align the title when Back
+  // is present, so it sits after the rule rather than over it.
+  if (withBack) props.titleText.align = fui::TextAlign::Left;
   props.subtitleText = tokens.smallText;
   props.styles = tokens.popup;
   props.sidePadding = tokens.headerSidePadding;
@@ -493,13 +522,22 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
     const int titleTop = static_cast<int>(band.height) - tokens.headerUnderline - tokens.spaceMd - titleLineHeight;
     props.titleOffsetY = static_cast<int16_t>(titleTop - (static_cast<int>(band.height) - titleLineHeight) / 2);
   } else {
+    // The Back label lives at the far left of the band, so the title has to be
+    // kept clear of it exactly as it is kept clear of the battery.
+    const int16_t backReserve =
+        withBack ? static_cast<int16_t>(renderer.getTextWidth(UI_10_FONT_ID, backHeaderLabel()) + kHeaderBackGap * 3)
+                 : 0;
     const int16_t reserve = static_cast<int16_t>(batteryReserve + labelReserve + tokens.spaceMd);
+    (void)clockReserve;
     if (batteryLeft) {
       props.leftReserve = reserve;
       props.rightReserve = clockReserve;
     } else {
-      props.rightReserve = reserve;
-      props.leftReserve = clockReserve;
+      props.rightReserve = static_cast<int16_t>(reserve + clockReserve);
+      props.leftReserve = backReserve;
+    }
+    if (batteryLeft) {
+      props.leftReserve = static_cast<int16_t>(props.leftReserve + clockReserve + backReserve);
     }
   }
   // Underline only under a titled header: an untitled band (Lyra home screen)
@@ -546,10 +584,42 @@ void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* t
     if (showUsb) place(usbWidth, "USB", false);
 
     if (showClock) {
-      const int clockX = batteryLeft ? static_cast<int>(band.right()) - tokens.headerSidePadding - clockWidth
-                                     : static_cast<int>(band.x) + tokens.headerSidePadding;
+      // Always on the battery's side, immediately inboard of the status words.
+      // It used to take the opposite end of the band, which is the same left
+      // inset Back now uses -- the two stacked on top of each other.
+      const int clockX = batteryLeft ? cursorX : cursorX - clockWidth;
       drawStatusLabel(renderer, clockX, centerY, clockText, false);
     }
+  }
+
+  if (withBack) {
+    // "< Back |" beside the title, ON THE TITLE'S OWN LINE.
+    //
+    // Centring it in the whole band put it above the title in themes that give
+    // the title a lower sub-band (Lyra), so the two stacked instead of sitting
+    // side by side -- Back over the top of the word it belongs next to. The
+    // title's line is computed here the same way the header component computes
+    // it, so the two agree by construction rather than by luck.
+    const int titleLineHeight = ui.target.lineHeight(fui::GfxRendererTarget::FONT_TITLE);
+    const int titleTop = batteryDetached
+                             ? static_cast<int>(band.y) + static_cast<int>(band.height) - tokens.headerUnderline -
+                                   tokens.spaceMd - titleLineHeight
+                             : static_cast<int>(band.y) + (static_cast<int>(band.height) - titleLineHeight) / 2;
+    const int lineCenterY = titleTop + titleLineHeight / 2;
+
+    const char* label = backHeaderLabel();
+    int inkTop = 0;
+    int inkBottom = 0;
+    const int ascender = renderer.getFontAscenderSize(UI_10_FONT_ID);
+    const int top = renderer.getTextInkBounds(UI_10_FONT_ID, label, inkTop, inkBottom)
+                        ? lineCenterY + (inkTop + inkBottom) / 2 - ascender
+                        : lineCenterY - ascender / 2;
+    const int backX = static_cast<int>(band.x) + tokens.headerSidePadding;
+    renderer.drawText(UI_10_FONT_ID, backX, top, label);
+    // The rule sits between Back and the title, spanning only the title's line.
+    const int ruleX = backX + renderer.getTextWidth(UI_10_FONT_ID, label) + kHeaderBackGap;
+    renderer.drawLine(ruleX, titleTop + 2, ruleX, titleTop + titleLineHeight - 2, true);
+    setTouchBackButtonVisible(true);
   }
 
   if (manualRightLabel) {

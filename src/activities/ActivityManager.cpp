@@ -373,6 +373,16 @@ void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::
 void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefresh) {
   if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
     const auto& activityName = currentActivity->name;
+    // Back goes back ONE level, not to the top. Settings is opened from More, so
+    // leaving it belongs on More -- landing on Home with the selector parked on
+    // the More row looks like Back skipped a screen, because it did.
+    //
+    // Activities are replaced rather than stacked here (only one is resident at
+    // a time), so "the previous screen" cannot be popped and has to be named.
+    if (activityName == "Settings") {
+      goToMoreMenu();
+      return;
+    }
     if (activityName == "FileBrowser") {
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
     } else if (activityName == "RecentBooks") {
