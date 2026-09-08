@@ -884,9 +884,26 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
 int BaseTheme::getMenuRowHeight(const GfxRenderer&) const { return UITheme::getInstance().getMetrics().menuRowHeight; }
 
+void BaseTheme::drawRowCover(const GfxRenderer& renderer, const std::string& path, const int x, const int y,
+                             const int w, const int h) {
+  // A missing or unreadable cover draws as an empty frame: it is one row of the
+  // list, not the list. drawBitmap fits the art to the box, so a cover rendered
+  // at the detail geometry scales down to a row without a second thumbnail.
+  renderer.drawRect(x, y, w, h);
+  if (path.empty()) return;
+  HalFile file;
+  if (!Storage.openFileForRead("ROW", path, file)) return;
+  Bitmap bitmap(file);
+  if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+    renderer.drawBitmap(bitmap, x, y, w, h);
+  }
+  file.close();
+}
+
 void BaseTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                const std::function<std::string(int index)>& buttonLabel,
-                               const std::function<UIIcon(int index)>& rowIcon) const {
+                               const std::function<UIIcon(int index)>& rowIcon,
+                              const std::function<std::string(int index)>& rowCover) const {
   for (int i = 0; i < buttonCount; ++i) {
     const int tileY = BaseMetrics::values.verticalSpacing + rect.y +
                       static_cast<int>(i) * (BaseMetrics::values.menuRowHeight + BaseMetrics::values.menuSpacing);

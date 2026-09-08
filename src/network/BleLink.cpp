@@ -61,6 +61,15 @@ constexpr const char* CROSSPOINT_ROOT = "/.crosspoint";
 // CrossPointSettings already persists -- toJson()/fromJson() are the single
 // definition of what a setting is, so the transport adds no second schema to
 // keep in step.
+// One cover and one metadata file per book, keyed by the book's filename. The
+// app builds both from Calibre -- it already has the cover art and the metadata
+// -- so the reader never opens a book to draw its shelf. Sent BEFORE the book
+// itself, so the row can show a cover and a blurb while the file is still
+// copying.
+constexpr const char* BOOK_META_DIR = "/.crosspoint/bookmeta";
+constexpr const char* BOOK_META_PART_PATH = "/.crosspoint/.bookmeta.part";
+constexpr const char* BOOK_META_INBOX_PATH = "/.crosspoint/bookmeta-in.cpct";
+constexpr size_t MAX_BLE_BOOK_META_BYTES = 96 * 1024;
 constexpr const char* SETTINGS_SNAPSHOT_PATH = "/.crosspoint/ble-settings.json";
 constexpr const char* SETTINGS_SNAPSHOT_NAME = "settings.json";
 constexpr const char* SETTINGS_INBOX_PATH = "/.crosspoint/ble-settings-in.json";
@@ -1317,6 +1326,23 @@ void BleLink::onControlWrite(const std::string& value) {
       fileName_ = PROGRESS_BATCH_NAME;
       partPath_ = PROGRESS_BATCH_PART_PATH;
       finalPath_ = PROGRESS_BATCH_PATH;
+    } else if (kind == "book_meta") {
+      // Small by construction: a 1-bit cover at the row geometry plus a short
+      // blurb. The cap is generous enough for a detail-sized cover and mean
+      // enough that a malformed size cannot fill the card.
+      if (expectedSize_ == 0 || expectedSize_ > MAX_BLE_BOOK_META_BYTES) {
+        setError("invalid book metadata size");
+        return;
+      }
+      if (!Storage.ensureDirectoryExists(CROSSPOINT_ROOT)) {
+        setError("could not create data directory");
+        return;
+      }
+      transferKind_ = TransferKind::BOOK_META;
+      bookMetaReq_ = responseReq;
+      fileName_ = "bookmeta";
+      partPath_ = BOOK_META_PART_PATH;
+      finalPath_ = BOOK_META_INBOX_PATH;
     } else if (kind == "settings") {
       // Settings are the device's own state, and several of them (orientation,
       // theme, sleep timeout) change what is on screen the moment they land.
@@ -1598,7 +1624,8 @@ void BleLink::processCommit() {
     return;
   }
   if ((transferKind_ == TransferKind::FIRMWARE || transferKind_ == TransferKind::PROGRESS ||
-       transferKind_ == TransferKind::SETTINGS_INBOX || transferKind_ == TransferKind::CATALOG_PAGE ||
+       transferKind_ == TransferKind::SETTINGS_INBOX || transferKind_ == TransferKind::BOOK_META ||
+       transferKind_ == TransferKind::CATALOG_PAGE ||
        transferKind_ == TransferKind::CATALOG_DETAIL) &&
       Storage.exists(finalPath_.c_str()) && !Storage.remove(finalPath_.c_str())) {
     setError("could not replace staged upload");
@@ -1644,6 +1671,16 @@ void BleLink::processCommit() {
     // Only now that the whole batch is on disk and its SHA-256 checks out does
     // anything get written underneath a book.
     processProgressBatch();
+    return;
+  }
+
+  if (transferKind_ == TransferKind::BOOK_META) {
+    if (!applyBookMetaDocument()) {
+      resetTransfer(true);
+      return;
+    }
+    HomeShelfStore::markStale();
+    setState(State::SAVED);
     return;
   }
 
@@ -1804,6 +1841,72 @@ void BleLink::startSettingsDownload(const size_t offset, const size_t chunkSize)
   }
   startFileDownload(SETTINGS_SNAPSHOT_PATH, SETTINGS_SNAPSHOT_NAME, TransferKind::SETTINGS_SNAPSHOT, offset,
                     chunkSize);
+}
+
+bool BleLink::applyBookMetaDocument() {
+  // The container is the Store's own format, so this reuses the parser that
+  // already knows how to split a header from its thumbnails rather than adding
+  // a second wire format to keep in step.
+  if (!Storage.ensureDirectoryExists(BOOK_META_DIR)) {
+    setError("could not create the book metadata directory");
+    return false;
+  }
+  BleCatalog::Page parsed;
+  std::string error;
+  const bool ok = BleCatalog::parseContainer(BOOK_META_INBOX_PATH, BOOK_META_DIR, bookMetaReq_, /*detail=*/true,
+                                             BOOKS_ROOT, parsed, error);
+  Storage.remove(BOOK_META_INBOX_PATH);
+  if (!ok || parsed.entries.empty()) {
+    setError(error.empty() ? "invalid book metadata" : error);
+    return false;
+  }
+
+  const auto& entry = parsed.entries.front();
+  // Keyed by the book's filename, because that is the only name the shelf and
+  // the app agree on -- the reader has no catalogue ids.
+  if (!isSafeBleBookName(entry.filename)) {
+    setError("book metadata names no usable book");
+    return false;
+  }
+  const std::string stem = std::string(BOOK_META_DIR) + "/" + entry.filename;
+
+  // The cover lands wherever parseContainer put it; move it to the stable name
+  // the Library looks for, so a redelivery replaces rather than accumulates.
+  const std::string coverPath = stem + ".bmp";
+  if (!entry.thumbPath.empty() && entry.thumbPath != coverPath) {
+    if (Storage.exists(coverPath.c_str())) Storage.remove(coverPath.c_str());
+    if (!Storage.rename(entry.thumbPath.c_str(), coverPath.c_str())) {
+      LOG_ERR("BLE", "could not place the cover for %s", entry.filename.c_str());
+    }
+  }
+
+  JsonDocument doc;
+  doc["title"] = entry.title.c_str();
+  doc["author"] = entry.author.c_str();
+  doc["description"] = entry.description.c_str();
+  doc["series"] = entry.series.c_str();
+  doc["publisher"] = entry.publisher.c_str();
+  doc["published"] = entry.published.c_str();
+  doc["language"] = entry.language.c_str();
+  doc["tags"] = entry.tags.c_str();
+  String json;
+  serializeJson(doc, json);
+  const std::string metaPath = stem + ".json";
+  if (Storage.exists(metaPath.c_str())) Storage.remove(metaPath.c_str());
+  HalFile out;
+  if (!Storage.openFileForWrite("BLE", metaPath, out)) {
+    setError("could not write the book metadata");
+    return false;
+  }
+  const bool written = out.print(json) == json.length();
+  out.close();
+  if (!written) {
+    Storage.remove(metaPath.c_str());
+    setError("could not write the book metadata");
+    return false;
+  }
+  LOG_INF("BLE", "book metadata stored for %s", entry.filename.c_str());
+  return true;
 }
 
 bool BleLink::applySettingsDocument() {
@@ -2210,6 +2313,7 @@ std::string BleLink::buildStatusJson(const StatusScope scope, const unsigned det
     uploadKinds.add("catalog_page");
     uploadKinds.add("catalog_detail");
     uploadKinds.add("settings");
+    uploadKinds.add("book_meta");
     JsonArray downloadKinds = doc["download_kinds"].to<JsonArray>();
     downloadKinds.add("crash_report");
     downloadKinds.add("library");

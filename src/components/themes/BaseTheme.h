@@ -267,9 +267,16 @@ class BaseTheme {
   virtual void drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                                    const int selectorIndex, bool& coverRendered, bool& coverBufferStored,
                                    bool& bufferRestored, std::function<bool()> storeCoverBuffer) const;
+  /// \p rowCover, when supplied, returns a path to a 1-bit BMP to draw in place
+  /// of the row's icon -- the book's cover, sent by the phone alongside the book.
+  /// An empty path falls back to \p rowIcon, so a book with no cover still gets
+  /// the generic mark rather than a hole in the list.
   virtual void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                               const std::function<std::string(int index)>& buttonLabel,
-                              const std::function<UIIcon(int index)>& rowIcon) const;
+                              const std::function<UIIcon(int index)>& rowIcon,
+                              const std::function<std::string(int index)>& rowCover = nullptr) const;
+  /// Draws a cover BMP into the box, or an empty frame when it cannot be read.
+  static void drawRowCover(const GfxRenderer& renderer, const std::string& path, int x, int y, int w, int h);
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   static void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage, const int pageCount,

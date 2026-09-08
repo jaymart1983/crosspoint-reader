@@ -140,7 +140,9 @@ int RoundedRaffTheme::getMenuRowHeight(const GfxRenderer& renderer) const {
 
 void RoundedRaffTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                       const std::function<std::string(int index)>& buttonLabel,
-                                      const std::function<UIIcon(int index)>& rowIcon) const {
+                                      const std::function<UIIcon(int index)>& rowIcon,
+                                      const std::function<std::string(int index)>& rowCover) const {
+  (void)rowCover;  // this theme draws its own row art; covers are Lyra's for now
   (void)rowIcon;
   const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
   const int rowX = rect.x + sidePadding;

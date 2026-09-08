@@ -305,7 +305,8 @@ void LyraTheme::drawEmptyRecents(const GfxRenderer& renderer, const Rect rect) c
 
 void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                const std::function<std::string(int index)>& buttonLabel,
-                               const std::function<UIIcon(int index)>& rowIcon) const {
+                               const std::function<UIIcon(int index)>& rowIcon,
+                               const std::function<std::string(int index)>& rowCover) const {
   for (int i = 0; i < buttonCount; ++i) {
     int tileWidth = rect.width - LyraMetrics::values.contentSidePadding * 2;
     Rect tileRect = Rect{rect.x + LyraMetrics::values.contentSidePadding,
@@ -324,7 +325,18 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
     const int textY = tileRect.y + (LyraMetrics::values.menuRowHeight - lineHeight) / 2;
 
-    if (rowIcon != nullptr) {
+    // A cover if the phone sent one, the generic icon otherwise. The cover is
+    // drawn at the row's own height so a taller theme simply gets a bigger
+    // thumbnail, and a book with no cover keeps its mark rather than leaving a
+    // ragged left edge where the art would have been.
+    std::string coverPath = rowCover != nullptr ? rowCover(i) : std::string();
+    if (!coverPath.empty()) {
+      const int coverH = LyraMetrics::values.menuRowHeight - 8;
+      // 2:3 is the usual book aspect; the bitmap is fitted inside either way.
+      const int coverW = (coverH * 2) / 3;
+      drawRowCover(renderer, coverPath, textX, tileRect.y + 4, coverW, coverH);
+      textX += coverW + hPaddingInSelection + 2;
+    } else if (rowIcon != nullptr) {
       UIIcon icon = rowIcon(i);
       const uint8_t* iconBitmap = iconForName(icon);
       if (iconBitmap != nullptr) {

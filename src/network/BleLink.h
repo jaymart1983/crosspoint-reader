@@ -71,6 +71,7 @@ class BleLink {
     // Not SETTINGS: that name is a macro for the settings singleton
     // (CrossPointSettings.h), and an enumerator by that name expands inside the
     // enum and takes the whole class declaration with it.
+    BOOK_META,        ///< app -> device: a book's cover and metadata, sent ahead of the book
     SETTINGS_INBOX,   ///< app -> device: a settings document to apply
     SETTINGS_SNAPSHOT ///< device -> app: the current settings document
   };
@@ -264,6 +265,12 @@ class BleLink {
   // Parses a committed settings document and applies it. Returns false with
   // the error already set when the document is unusable.
   bool applySettingsDocument();
+  // Unpacks a committed book_meta container into the persistent sidecar store:
+  // one BMP and one JSON per book, keyed by the book's filename.
+  bool applyBookMetaDocument();
+  // The req id the app stamped into the book_meta container. parseContainer
+  // checks it, so it has to survive from start_put to commit.
+  uint32_t bookMetaReq_ = 0;
   void processProgressBatch();
   void pumpDownload();
   void resetTransfer(bool removePart);

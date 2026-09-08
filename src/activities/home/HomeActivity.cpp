@@ -32,6 +32,8 @@ static int libraryListTop(const ThemeMetrics& metrics) {
 }
 
 constexpr const char* BOOKS_ROOT = "/Books";
+// Where the phone puts a book's cover: one BMP per book, keyed by filename.
+constexpr const char* BOOK_META_DIR = "/.crosspoint/bookmeta";
 
 // The cover the recents list already generated for this book, if any. Looked up
 // by path in the ten-entry recents list rather than through
@@ -468,6 +470,7 @@ void HomeActivity::render(RenderLock&&) {
   // Books first, then the two rows that are not books.
   std::vector<std::string> menuItems;
   std::vector<UIIcon> menuIcons;
+  std::vector<std::string> menuCovers;
   menuItems.reserve(renderedMenuRowCount());
   menuIcons.reserve(renderedMenuRowCount());
   if (metrics.homeContinueReadingInMenu) {
@@ -499,6 +502,10 @@ void HomeActivity::render(RenderLock&&) {
       menuItems.push_back(book.title);
     }
     menuIcons.push_back(Book);
+    const auto slash = book.path.find_last_of('/');
+    const std::string filename = slash == std::string::npos ? book.path : book.path.substr(slash + 1);
+    const std::string cover = std::string(BOOK_META_DIR) + "/" + filename + ".bmp";
+    menuCovers.push_back(Storage.exists(cover.c_str()) ? cover : std::string());
   }
 
   // Home is the navigation root, so it draws no Back chip and gives the hint
@@ -514,7 +521,12 @@ void HomeActivity::render(RenderLock&&) {
            pageHeight - libraryListTop(metrics) - menuBottomReserve - metrics.verticalSpacing},
       static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - coverCount,
-      [&menuItems](int index) { return menuItems[index]; }, [&menuIcons](int index) { return menuIcons[index]; });
+      [&menuItems](int index) { return menuItems[index]; }, [&menuIcons](int index) { return menuIcons[index]; },
+      // The cover the phone sent with the book, if it did. Built from the book's
+      // filename, which is the only name the shelf and the app agree on -- the
+      // reader has no catalogue ids. Nothing is opened or decoded here beyond
+      // the BMP itself.
+      [&menuCovers](int index) { return menuCovers[index]; });
 
   // The pager, full width, across the bottom. Always drawn -- greyed rather than
   // hidden -- so the bar does not appear and disappear as the shelf grows past
